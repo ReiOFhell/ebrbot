@@ -35,8 +35,18 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ============================================================
 INKOSI_ID = "1187734043236778027"
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-DB_PATH = DATA_DIR / "players.db"
+
+# Em alguns hosts (ex.: deploy gerenciado), o diretório do código pode ser somente leitura.
+# Por isso, o banco tenta caminhos em ordem de prioridade até achar um local gravável.
+ENV_DATA_DIR = os.getenv("EBR_DATA_DIR", "").strip()
+DATA_DIR_CANDIDATES = [
+    Path(ENV_DATA_DIR) if ENV_DATA_DIR else None,
+    Path.cwd() / "data",
+    BASE_DIR / "data",
+    Path("/tmp") / "ebrbot_data",
+]
+DATA_DIR: Path | None = None
+DB_PATH: Path | None = None
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 DISCORD_TOKEN_FALLBACK = "COLE_SEU_TOKEN_AQUI"
@@ -71,12 +81,41 @@ def resolve_token() -> str:
     return token
 
 
+def resolve_db_path() -> Path:
+    global DATA_DIR, DB_PATH
+
+    if DB_PATH is not None:
+        return DB_PATH
+
+    for candidate in DATA_DIR_CANDIDATES:
+        if candidate is None:
+            continue
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            test_file = candidate / ".write_test"
+            test_file.write_text("ok", encoding="utf-8")
+            test_file.unlink(missing_ok=True)
+            DATA_DIR = candidate
+            DB_PATH = candidate / "players.db"
+            logger.info("SQLite path resolvido para: %s", DB_PATH)
+            return DB_PATH
+        except Exception:
+            logger.warning("Diretório não gravável para SQLite: %s", candidate)
+
+    raise RuntimeError("Nenhum diretório gravável disponível para players.db")
+
+
+def get_conn() -> sqlite3.Connection:
+    db_file = resolve_db_path()
+    return sqlite3.connect(db_file)
+
+
 # ============================================================
 # 4) BANCO (SQLITE HELPERS)
 # ============================================================
 def init_db() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
+    resolve_db_path()
+    with get_conn() as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS players (
@@ -111,7 +150,7 @@ def init_db() -> None:
 
 
 def get_player(user_id: str) -> dict[str, Any] | None:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM players WHERE user_id = ?", (user_id,)).fetchone()
         return dict(row) if row else None
@@ -133,7 +172,7 @@ def create_player(
     lore_texto: str,
     pressagio: str,
 ) -> None:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         conn.execute(
             """
             INSERT OR REPLACE INTO players (
@@ -164,7 +203,7 @@ def create_player(
 
 
 def delete_player(user_id: str) -> None:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         conn.execute("DELETE FROM players WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM annals WHERE user_id = ?", (user_id,))
         conn.commit()
@@ -198,7 +237,7 @@ def create_inkosi_record_if_needed(user_id: str) -> dict[str, Any]:
 
 
 def add_annal_entry(user_id: str, entrada: str) -> None:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         conn.execute(
             "INSERT INTO annals (user_id, entrada, criado_em) VALUES (?, ?, ?)",
             (user_id, entrada, datetime.now(timezone.utc).isoformat()),
@@ -207,7 +246,7 @@ def add_annal_entry(user_id: str, entrada: str) -> None:
 
 
 def get_annals(user_id: str, limit: int = 5) -> list[dict[str, Any]]:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT entrada, criado_em FROM annals WHERE user_id = ? ORDER BY id DESC LIMIT ?",
@@ -217,7 +256,7 @@ def get_annals(user_id: str, limit: int = 5) -> list[dict[str, Any]]:
 
 
 def get_player_counts_by_class() -> list[dict[str, Any]]:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT classe, COUNT(*) AS total FROM players GROUP BY classe ORDER BY total DESC"
@@ -383,28 +422,33 @@ def normalize_class_input(raw: str) -> str:
 def register_class_for_user(user_id: str, classe_id: str) -> tuple[bool, str]:
     if user_id == INKOSI_ID:
         return False, "A assinatura ABSOLUTA não pode ser definida por escolha comum."
-    if player_exists(user_id):
-        return False, "Teu destino já foi inscrito. O Grimório não aceita duplicatas."
 
-    data = CLASSES[classe_id]
-    attrs = data["atributos"]
-    create_player(
-        user_id=user_id,
-        classe_id=classe_id,
-        is_excecao=0,
-        nivel="1",
-        forca=attrs["FOR"],
-        resistencia=attrs["RES"],
-        agilidade=attrs["AGI"],
-        inteligencia=attrs["INT"],
-        mana=attrs["MAN"],
-        crescimento=data["crescimento"],
-        titulo=data["titulo"],
-        lore_texto=data["lore_texto"],
-        pressagio=data["pressagio"],
-    )
-    add_annal_entry(user_id, f"Ritual do Despertar concluído. Caminho selado: {data['nome']}.")
-    return True, data["nome"]
+    try:
+        if player_exists(user_id):
+            return False, "Teu destino já foi inscrito. O Grimório não aceita duplicatas."
+
+        data = CLASSES[classe_id]
+        attrs = data["atributos"]
+        create_player(
+            user_id=user_id,
+            classe_id=classe_id,
+            is_excecao=0,
+            nivel="1",
+            forca=attrs["FOR"],
+            resistencia=attrs["RES"],
+            agilidade=attrs["AGI"],
+            inteligencia=attrs["INT"],
+            mana=attrs["MAN"],
+            crescimento=data["crescimento"],
+            titulo=data["titulo"],
+            lore_texto=data["lore_texto"],
+            pressagio=data["pressagio"],
+        )
+        add_annal_entry(user_id, f"Ritual do Despertar concluído. Caminho selado: {data['nome']}.")
+        return True, data["nome"]
+    except sqlite3.Error:
+        logger.exception("Falha SQLite ao registrar classe")
+        return False, "Falha no arquivo do Grimório (SQLite). Defina EBR_DATA_DIR em pasta gravável e reinicie."
 
 # ============================================================
 # 6) UI (CLASSEVIEW)
@@ -505,7 +549,14 @@ async def iniciar(ctx: commands.Context) -> None:
         user_id = str(ctx.author.id)
 
         if user_id == INKOSI_ID:
-            create_inkosi_record_if_needed(user_id)
+            try:
+                create_inkosi_record_if_needed(user_id)
+            except sqlite3.Error:
+                logger.exception("Falha SQLite ao criar registro Inkosi")
+                await send_grimoire_error(ctx, "iniciar.db")
+                await ctx.send("Dica técnica: configure `EBR_DATA_DIR` para um diretório gravável no host.")
+                return
+
             embed = discord.Embed(
                 title="REGISTRO IMPOSSÍVEL DETECTADO",
                 description=(
