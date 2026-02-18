@@ -31,18 +31,18 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 
 # ============================================================
-# 3) CONSTANTES (INKOSI_ID, PATHS, ETC)
+# 3) CONSTANTES (INKOSI_ID, PATHS, TOKENS)
 # ============================================================
 INKOSI_ID = "1187734043236778027"
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "players.db"
 
-# Usa DISCORD_TOKEN por ambiente. Se não existir, use o fallback abaixo.
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 DISCORD_TOKEN_FALLBACK = "COLE_SEU_TOKEN_AQUI"
 
 EMBED_COLOR = discord.Color.from_rgb(45, 18, 54)
+ERROR_TEXT = "O Grimório está em silêncio."
 
 
 def resolve_token() -> str:
@@ -55,7 +55,7 @@ def resolve_token() -> str:
             "Token ausente. Defina DISCORD_TOKEN no ambiente ou preencha DISCORD_TOKEN_FALLBACK com um token válido."
         )
 
-    if token.count('.') < 2:
+    if token.count(".") < 2:
         raise RuntimeError(
             "Token Discord parece inválido (formato inesperado). Verifique se há espaços, aspas extras ou token incorreto."
         )
@@ -86,6 +86,16 @@ def init_db() -> None:
                 titulo TEXT,
                 lore_texto TEXT,
                 pressagio TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS annals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                entrada TEXT NOT NULL,
+                criado_em TEXT NOT NULL
             )
             """
         )
@@ -148,6 +158,7 @@ def create_player(
 def delete_player(user_id: str) -> None:
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM players WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM annals WHERE user_id = ?", (user_id,))
         conn.commit()
 
 
@@ -178,8 +189,36 @@ def create_inkosi_record_if_needed(user_id: str) -> dict[str, Any]:
     return get_player(user_id) or {}
 
 
+def add_annal_entry(user_id: str, entrada: str) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO annals (user_id, entrada, criado_em) VALUES (?, ?, ?)",
+            (user_id, entrada, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+
+
+def get_annals(user_id: str, limit: int = 5) -> list[dict[str, Any]]:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT entrada, criado_em FROM annals WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_player_counts_by_class() -> list[dict[str, Any]]:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT classe, COUNT(*) AS total FROM players GROUP BY classe ORDER BY total DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 # ============================================================
-# 5) DADOS CANÔNICOS (CLASSES, LORE_CLASSES)
+# 5) DADOS CANÔNICOS (CLASSES, LORE, CRÔNICA)
 # ============================================================
 CLASSES: dict[str, dict[str, Any]] = {
     "guerreiro": {
@@ -239,6 +278,62 @@ CLASSES: dict[str, dict[str, Any]] = {
     },
 }
 
+WORLD_CHRONICLE = [
+    (
+        "I — O Pacto de Ônix",
+        "Antes dos calendários, sete casas juraram sangue e silêncio para erguer EBR sobre ruínas consagradas.",
+    ),
+    (
+        "II — A Noite dos Arquivos",
+        "O Grimório nasceu quando a memória humana falhou. Desde então, destino é escritura, não opinião.",
+    ),
+    (
+        "III — A Fenda Velada",
+        "Ao norte, o céu rasgou-se em vidro negro. De lá ecoam nomes sem boca e promessas sem dono.",
+    ),
+    (
+        "IV — O Trono Sem Rostro",
+        "Diz-se que a Coroa governa, mas ninguém recorda o rosto do primeiro soberano desde a Última Vigília.",
+    ),
+]
+
+FACTIONS = {
+    "ordem-vigilia": {
+        "titulo": "Ordem da Vigília Rubra",
+        "resumo": "Guarda noturna dos portões internos, juramentada a impedir que o caos atravesse o mármore imperial.",
+        "dogma": "Vigiar é amar o Império mais do que o próprio descanso.",
+    },
+    "conclave-obsidiano": {
+        "titulo": "Conclave Obsidiano",
+        "resumo": "Magistrados arcanos que interpretam presságios e codificam o interdito.",
+        "dogma": "Toda magia deve uma dívida ao silêncio.",
+    },
+    "legiao-cinzenta": {
+        "titulo": "Legião Cinzenta",
+        "resumo": "Força militar imperial enviada aos limites da cartografia para conter insurgências e anomalias.",
+        "dogma": "A fronteira existe onde a Legião decide permanecer.",
+    },
+    "cartografos-fenda": {
+        "titulo": "Cartógrafos da Fenda",
+        "resumo": "Exploradores e escribas de campo que desenham mapas de zonas mutáveis e locais proibidos.",
+        "dogma": "Nomear é dominar, registrar é sobreviver.",
+    },
+}
+
+REGIONS = [
+    "**Palácio de Basalto** — centro político e ritual do EBR.",
+    "**Bastião da Vigília** — fortaleza da guarda imperial noturna.",
+    "**Jardins da Cinza Branca** — memorial dos juramentos quebrados.",
+    "**Fenda de Vesper** — anomalia celeste e berço de horrores sem forma.",
+    "**Estrada dos Sinos Mudos** — rota onde nenhum mensageiro fala após o pôr do sol.",
+]
+
+PHASE_2_FOUNDATIONS = [
+    "Tabela `players` já contém campos narrativos e progressão textual (`nivel`, `crescimento`, `pressagio`).",
+    "Tabela `annals` permite histórico pessoal persistente para futuras campanhas e arcos de personagem.",
+    "Funções de agregação por classe prontas para eventos de facção e guerra narrativa.",
+]
+
 
 # ============================================================
 # 6) UI (CLASSEVIEW)
@@ -258,14 +353,15 @@ class ClasseView(discord.ui.View):
 
     async def escolher_classe(self, interaction: discord.Interaction, classe_id: str) -> None:
         try:
-            if str(interaction.user.id) == INKOSI_ID:
+            user_id = str(interaction.user.id)
+            if user_id == INKOSI_ID:
                 await interaction.response.send_message(
                     "A assinatura ABSOLUTA não pode ser replicada por escolha ritual.",
                     ephemeral=True,
                 )
                 return
 
-            if player_exists(str(interaction.user.id)):
+            if player_exists(user_id):
                 await interaction.response.send_message(
                     "Teu destino já foi inscrito. O Grimório não aceita duplicatas.",
                     ephemeral=True,
@@ -275,7 +371,7 @@ class ClasseView(discord.ui.View):
             base = CLASSES[classe_id]
             attrs = base["atributos"]
             create_player(
-                user_id=str(interaction.user.id),
+                user_id=user_id,
                 classe_id=classe_id,
                 is_excecao=0,
                 nivel="1",
@@ -290,6 +386,11 @@ class ClasseView(discord.ui.View):
                 pressagio=base["pressagio"],
             )
 
+            add_annal_entry(
+                user_id,
+                f"Ritual do Despertar concluído. Caminho selado: {base['nome']}.",
+            )
+
             for child in self.children:
                 if isinstance(child, discord.ui.Button):
                     child.disabled = True
@@ -297,12 +398,12 @@ class ClasseView(discord.ui.View):
             confirm = discord.Embed(
                 title="RITUAL CONCLUÍDO",
                 description=(
-                    f"**{interaction.user.display_name}** foi inscrito no Grimório como "
-                    f"**{base['nome']}**.\n"
+                    f"**{interaction.user.display_name}** foi inscrito no Grimório como **{base['nome']}**.\n"
                     "Que os corredores do EBR testemunhem o primeiro selo do teu destino."
                 ),
                 color=EMBED_COLOR,
             )
+            confirm.add_field(name="Título", value=base["titulo"], inline=False)
             confirm.set_footer(text="FASE 1 — Núcleo do Jogador • Juramento selado")
 
             await interaction.response.edit_message(view=self)
@@ -310,33 +411,38 @@ class ClasseView(discord.ui.View):
         except Exception:
             logger.exception("Falha ao escolher classe")
             if interaction.response.is_done():
-                await interaction.followup.send("O Grimório está em silêncio.", ephemeral=True)
+                await interaction.followup.send(ERROR_TEXT, ephemeral=True)
             else:
-                await interaction.response.send_message("O Grimório está em silêncio.", ephemeral=True)
+                await interaction.response.send_message(ERROR_TEXT, ephemeral=True)
 
     @discord.ui.button(label="Guerreiro", style=discord.ButtonStyle.danger)
     async def guerreiro_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        del button
         await self.escolher_classe(interaction, "guerreiro")
 
     @discord.ui.button(label="Mago", style=discord.ButtonStyle.primary)
     async def mago_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        del button
         await self.escolher_classe(interaction, "mago")
 
     @discord.ui.button(label="Caçador", style=discord.ButtonStyle.secondary)
     async def cacador_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        del button
         await self.escolher_classe(interaction, "cacador")
 
     @discord.ui.button(label="Soldado", style=discord.ButtonStyle.success)
     async def soldado_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        del button
         await self.escolher_classe(interaction, "soldado")
 
     @discord.ui.button(label="Explorador", style=discord.ButtonStyle.secondary)
     async def explorador_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        del button
         await self.escolher_classe(interaction, "explorador")
 
 
 # ============================================================
-# 7) COMANDOS (!iniciar, !perfil, !resetar, !eu, !changelog, !guia)
+# 7) COMANDOS PRINCIPAIS E NOVOS COMANDOS DE LORE
 # ============================================================
 @bot.command(name="iniciar")
 async def iniciar(ctx: commands.Context) -> None:
@@ -354,16 +460,8 @@ async def iniciar(ctx: commands.Context) -> None:
                 ),
                 color=discord.Color.dark_red(),
             )
-            embed.add_field(
-                name="Designação",
-                value="Aquele que Não se Submete",
-                inline=False,
-            )
-            embed.add_field(
-                name="Classificação",
-                value="Não Indexável",
-                inline=False,
-            )
+            embed.add_field(name="Designação", value="Aquele que Não se Submete", inline=False)
+            embed.add_field(name="Classificação", value="Não Indexável", inline=False)
             embed.set_footer(text="FASE 1 — Núcleo do Jogador • Exceção canônica")
             await ctx.send(embed=embed)
             return
@@ -388,18 +486,14 @@ async def iniciar(ctx: commands.Context) -> None:
             color=EMBED_COLOR,
         )
 
-        for cid, data in CLASSES.items():
-            embed.add_field(
-                name=f"{data['icone']} {data['nome']}",
-                value=data["frase"],
-                inline=False,
-            )
+        for data in CLASSES.values():
+            embed.add_field(name=f"{data['icone']} {data['nome']}", value=data["frase"], inline=False)
 
         embed.set_footer(text="FASE 1 — Núcleo do Jogador • O destino começa aqui")
         await ctx.send(embed=embed, view=ClasseView(author_id=ctx.author.id))
     except Exception:
         logger.exception("Falha no comando !iniciar")
-        await ctx.send("O Grimório está em silêncio.")
+        await ctx.send(ERROR_TEXT)
 
 
 @bot.command(name="perfil")
@@ -454,7 +548,8 @@ async def perfil(ctx: commands.Context) -> None:
             value=(
                 f"**Nome:** {ctx.author.display_name}\n"
                 f"**Classe:** {classe_nome}\n"
-                f"**Título:** {player['titulo']}"
+                f"**Título:** {player['titulo']}\n"
+                f"**Nível Ritual:** {player['nivel']}"
             ),
             inline=False,
         )
@@ -474,7 +569,7 @@ async def perfil(ctx: commands.Context) -> None:
         await ctx.send(embed=embed)
     except Exception:
         logger.exception("Falha no comando !perfil")
-        await ctx.send("O Grimório está em silêncio.")
+        await ctx.send(ERROR_TEXT)
 
 
 @bot.command(name="resetar")
@@ -482,9 +577,8 @@ async def perfil(ctx: commands.Context) -> None:
 async def resetar(ctx: commands.Context, membro: discord.Member) -> None:
     try:
         alvo_id = str(membro.id)
-        existe = player_exists(alvo_id)
 
-        if not existe:
+        if not player_exists(alvo_id):
             await ctx.send(f"Nenhum selo ativo foi encontrado para **{membro.display_name}**.")
             return
 
@@ -502,7 +596,7 @@ async def resetar(ctx: commands.Context, membro: discord.Member) -> None:
         )
     except Exception:
         logger.exception("Falha no comando !resetar")
-        await ctx.send("O Grimório está em silêncio.")
+        await ctx.send(ERROR_TEXT)
 
 
 @resetar.error
@@ -513,7 +607,7 @@ async def resetar_error(ctx: commands.Context, error: commands.CommandError) -> 
         await ctx.send("Uso correto: `!resetar @membro`")
     else:
         logger.exception("Erro não tratado em !resetar", exc_info=error)
-        await ctx.send("O Grimório está em silêncio.")
+        await ctx.send(ERROR_TEXT)
 
 
 @bot.command(name="eu")
@@ -523,18 +617,22 @@ async def eu(ctx: commands.Context) -> None:
 
 @bot.command(name="changelog")
 async def changelog(ctx: commands.Context) -> None:
-    embed = discord.Embed(title="Changelog — Fase 1", color=EMBED_COLOR)
+    embed = discord.Embed(title="Changelog — Núcleo Expandido", color=EMBED_COLOR)
     embed.description = (
-        "**Núcleo do Jogador**\n"
-        "• Ritual de criação única de personagem (`!iniciar`)\n"
-        "• Registro canônico persistente em SQLite (`!perfil`)\n"
-        "• Revogação administrativa de registros (`!resetar`)\n"
-        "• Comandos base de orientação (`!eu`, `!guia`)\n"
-        "• Exceção absoluta para Lord Inkosi (não indexável)\n\n"
-        "**Preparação para Fase 2 (não ativa):**\n"
-        "Estrutura de dados pronta para expansão de progressão e narrativa futura."
+        "**Base Fase 1**\n"
+        "• Criação única de personagem (`!iniciar`)\n"
+        "• Registro canônico persistente (`!perfil`)\n"
+        "• Revogação administrativa (`!resetar`)\n"
+        "• Exceção absoluta para Lord Inkosi\n\n"
+        "**Expansões de lore e mundo**\n"
+        "• Crônica oficial (`!cronica`)\n"
+        "• Facções canônicas (`!faccoes`, `!faccao`)\n"
+        "• Mapa textual de regiões (`!mapaebr`)\n"
+        "• Enciclopédia de classes (`!classeinfo`)\n"
+        "• Diário persistente (`!diario`, `!anais`)\n"
+        "• Relatório administrativo (`!relatorio`)"
     )
-    embed.set_footer(text="FASE 1 — Núcleo do Jogador")
+    embed.set_footer(text="EBR • Grimório de Destinos")
     await ctx.send(embed=embed)
 
 
@@ -542,31 +640,244 @@ async def changelog(ctx: commands.Context) -> None:
 async def guia(ctx: commands.Context) -> None:
     embed = discord.Embed(
         title="Guia do Grimório — EBR",
-        description=(
-            "A Fase 1 estabelece tua identidade canônica no Reino.\n"
-            "Não há ainda missões, combate, exploração, economia ativa ou RNG."
-        ),
+        description="Sistema social-RPG com foco narrativo, identidade persistente e lore imperial/dark.",
         color=EMBED_COLOR,
     )
     embed.add_field(
-        name="Comandos Disponíveis",
+        name="Comandos de Identidade",
         value=(
-            "`!iniciar` — Ritual do Despertar e escolha única de classe\n"
-            "`!perfil` — Exibe teu Registro Histórico\n"
-            "`!resetar @membro` — Revogação administrativa\n"
-            "`!eu` — Frase canônica do sistema\n"
-            "`!changelog` — Resumo da fase atual\n"
-            "`!guia` — Este painel"
+            "`!iniciar` • `!perfil` • `!resetar @membro`\n"
+            "`!eu` • `!changelog` • `!guia`"
         ),
         inline=False,
     )
     embed.add_field(
-        name="Estado do Projeto",
-        value="FASE 1 — Núcleo do Jogador ativo. FASE 2 apenas preparada na base.",
+        name="Comandos de Lore",
+        value=(
+            "`!prologo` • `!cronica` • `!lore`\n"
+            "`!faccoes` • `!faccao <id>` • `!mapaebr` • `!classeinfo <classe>`"
+        ),
         inline=False,
     )
-    embed.set_footer(text="FASE 1 — Núcleo do Jogador • Orientação oficial")
+    embed.add_field(
+        name="Comandos de Registro Pessoal",
+        value=(
+            "`!diario <texto>` — grava entrada no teu histórico\n"
+            "`!anais [@membro]` — exibe últimas entradas\n"
+            "`!relatorio` (admin) — visão geral do Grimório"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Linha Criativa",
+        value="Narrativa robusta, tom ritualístico e evolução pronta para campanhas da Fase 2.",
+        inline=False,
+    )
+    embed.set_footer(text="EBR • Orientação oficial")
     await ctx.send(embed=embed)
+
+
+@bot.command(name="prologo")
+async def prologo(ctx: commands.Context) -> None:
+    embed = discord.Embed(
+        title="PRÓLOGO — ETERNAL BRAZILIAN ROYAL",
+        description=(
+            "Quando o mundo comum se partiu, EBR ergueu colunas de basalto sobre a própria memória.\n"
+            "Aqui, nomes são selos; promessas, moedas; silêncio, lei.\n"
+            "Tu não nasceste para assistir ao destino — nasceste para ser inscrito nele."
+        ),
+        color=EMBED_COLOR,
+    )
+    embed.set_footer(text="EBR • O mundo recorda os que juram")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="cronica")
+async def cronica(ctx: commands.Context) -> None:
+    embed = discord.Embed(title="CRÔNICA IMPERIAL", color=EMBED_COLOR)
+    for capitulo, texto in WORLD_CHRONICLE:
+        embed.add_field(name=capitulo, value=texto, inline=False)
+    embed.set_footer(text="EBR • Arquivo canônico do mundo")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="lore")
+async def lore(ctx: commands.Context) -> None:
+    await cronica(ctx)
+
+
+@bot.command(name="faccoes")
+async def faccoes(ctx: commands.Context) -> None:
+    embed = discord.Embed(
+        title="FACÇÕES CANÔNICAS",
+        description="Cada facção sustenta uma parte do equilíbrio imperial.",
+        color=EMBED_COLOR,
+    )
+    for fid, data in FACTIONS.items():
+        embed.add_field(name=f"{data['titulo']} (`{fid}`)", value=data["resumo"], inline=False)
+    embed.set_footer(text="Use !faccao <id> para detalhes")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="faccao")
+async def faccao(ctx: commands.Context, *, faccao_id: str | None = None) -> None:
+    if not faccao_id:
+        await ctx.send("Uso: `!faccao <id>` • Exemplo: `!faccao ordem-vigilia`")
+        return
+
+    key = faccao_id.strip().lower()
+    data = FACTIONS.get(key)
+    if not data:
+        await ctx.send("Facção não encontrada. Use `!faccoes` para listar IDs válidos.")
+        return
+
+    embed = discord.Embed(title=data["titulo"], description=data["resumo"], color=EMBED_COLOR)
+    embed.add_field(name="Dogma", value=data["dogma"], inline=False)
+    embed.set_footer(text="EBR • Dossiê de Facção")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="mapaebr")
+async def mapaebr(ctx: commands.Context) -> None:
+    embed = discord.Embed(
+        title="MAPA TEXTUAL DO EBR",
+        description="Regiões de relevância canônica para futuras campanhas.",
+        color=EMBED_COLOR,
+    )
+    for local in REGIONS:
+        embed.add_field(name="Região", value=local, inline=False)
+    embed.set_footer(text="EBR • Cartografia ritual")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="classeinfo")
+async def classeinfo(ctx: commands.Context, *, classe_id: str | None = None) -> None:
+    if not classe_id:
+        await ctx.send("Uso: `!classeinfo <guerreiro|mago|cacador|soldado|explorador>`")
+        return
+
+    cid = classe_id.strip().lower()
+    data = CLASSES.get(cid)
+    if not data:
+        await ctx.send("Classe inválida. Opções: guerreiro, mago, cacador, soldado, explorador.")
+        return
+
+    attrs = data["atributos"]
+    embed = discord.Embed(
+        title=f"{data['icone']} {data['nome']}",
+        description=data["descricao"],
+        color=EMBED_COLOR,
+    )
+    embed.add_field(
+        name="Essência Inicial",
+        value=(
+            f"**FOR:** {attrs['FOR']} | **RES:** {attrs['RES']} | **AGI:** {attrs['AGI']} | "
+            f"**INT:** {attrs['INT']} | **MAN:** {attrs['MAN']}"
+        ),
+        inline=False,
+    )
+    embed.add_field(name="Título", value=data["titulo"], inline=False)
+    embed.add_field(name="Caminho", value=data["lore_texto"], inline=False)
+    embed.add_field(name="Crescimento", value=data["crescimento"], inline=False)
+    embed.add_field(name="Presságio", value=data["pressagio"], inline=False)
+    embed.set_footer(text="EBR • Enciclopédia de Classes")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="diario")
+async def diario(ctx: commands.Context, *, texto: str | None = None) -> None:
+    try:
+        user_id = str(ctx.author.id)
+        if not texto:
+            await ctx.send("Uso: `!diario <texto>`")
+            return
+
+        if len(texto) > 500:
+            await ctx.send("Tua entrada excede 500 caracteres. Seja preciso no juramento.")
+            return
+
+        if not player_exists(user_id) and user_id != INKOSI_ID:
+            await ctx.send("Primeiro sela tua identidade em `!iniciar` para escrever nos Anais.")
+            return
+
+        if user_id == INKOSI_ID:
+            create_inkosi_record_if_needed(user_id)
+
+        add_annal_entry(user_id, texto)
+        await ctx.send("Entrada gravada nos Anais. O Grimório testemunhou tuas palavras.")
+    except Exception:
+        logger.exception("Falha no comando !diario")
+        await ctx.send(ERROR_TEXT)
+
+
+@bot.command(name="anais")
+async def anais(ctx: commands.Context, membro: discord.Member | None = None) -> None:
+    try:
+        alvo = membro or ctx.author
+        user_id = str(alvo.id)
+
+        if not player_exists(user_id) and user_id != INKOSI_ID:
+            await ctx.send("Este nome não possui registro no Grimório.")
+            return
+
+        entries = get_annals(user_id, limit=5)
+        if not entries:
+            await ctx.send("Nenhuma entrada foi gravada nos Anais deste nome.")
+            return
+
+        embed = discord.Embed(
+            title=f"ANAIS DE {alvo.display_name.upper()}",
+            description="Últimas 5 entradas do registro pessoal.",
+            color=EMBED_COLOR,
+        )
+        for idx, item in enumerate(entries, start=1):
+            embed.add_field(
+                name=f"Entrada {idx} • {item['criado_em'][:19].replace('T', ' ')} UTC",
+                value=item["entrada"],
+                inline=False,
+            )
+        embed.set_footer(text="EBR • Memória persistente")
+        await ctx.send(embed=embed)
+    except Exception:
+        logger.exception("Falha no comando !anais")
+        await ctx.send(ERROR_TEXT)
+
+
+@bot.command(name="relatorio")
+@commands.has_permissions(administrator=True)
+async def relatorio(ctx: commands.Context) -> None:
+    try:
+        data = get_player_counts_by_class()
+        total = sum(int(item["total"]) for item in data)
+
+        embed = discord.Embed(
+            title="RELATÓRIO DO GRIMÓRIO",
+            description="Painel administrativo de registros canônicos.",
+            color=EMBED_COLOR,
+        )
+
+        if not data:
+            embed.add_field(name="Registros", value="Nenhum personagem inscrito.", inline=False)
+        else:
+            linhas = [f"• **{item['classe']}**: {item['total']}" for item in data]
+            embed.add_field(name="Distribuição por Classe", value="\n".join(linhas), inline=False)
+
+        embed.add_field(name="Total de Registros", value=str(total), inline=False)
+        embed.add_field(name="Base para Fase 2", value="\n".join(PHASE_2_FOUNDATIONS), inline=False)
+        embed.set_footer(text="EBR • Uso administrativo")
+        await ctx.send(embed=embed)
+    except Exception:
+        logger.exception("Falha no comando !relatorio")
+        await ctx.send(ERROR_TEXT)
+
+
+@relatorio.error
+async def relatorio_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("Somente administradores podem invocar `!relatorio`.")
+    else:
+        logger.exception("Erro não tratado em !relatorio", exc_info=error)
+        await ctx.send(ERROR_TEXT)
 
 
 # ============================================================
