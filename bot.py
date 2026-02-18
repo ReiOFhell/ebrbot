@@ -45,6 +45,24 @@ DISCORD_TOKEN_FALLBACK = "COLE_SEU_TOKEN_AQUI"
 EMBED_COLOR = discord.Color.from_rgb(45, 18, 54)
 
 
+def resolve_token() -> str:
+    token_env = (DISCORD_TOKEN or "").strip().strip('"').strip("'")
+    token_fallback = (DISCORD_TOKEN_FALLBACK or "").strip().strip('"').strip("'")
+
+    token = token_env if token_env else token_fallback
+    if not token or token == "COLE_SEU_TOKEN_AQUI":
+        raise RuntimeError(
+            "Token ausente. Defina DISCORD_TOKEN no ambiente ou preencha DISCORD_TOKEN_FALLBACK com um token válido."
+        )
+
+    if token.count('.') < 2:
+        raise RuntimeError(
+            "Token Discord parece inválido (formato inesperado). Verifique se há espaços, aspas extras ou token incorreto."
+        )
+
+    return token
+
+
 # ============================================================
 # 4) BANCO (SQLITE HELPERS)
 # ============================================================
@@ -569,11 +587,19 @@ def main() -> None:
         logger.exception("Falha ao iniciar banco SQLite")
         raise
 
-    token = DISCORD_TOKEN if DISCORD_TOKEN else DISCORD_TOKEN_FALLBACK
-    if not token or token == "COLE_SEU_TOKEN_AQUI":
-        raise RuntimeError("Defina DISCORD_TOKEN no ambiente ou preencha DISCORD_TOKEN_FALLBACK.")
+    try:
+        token = resolve_token()
+    except RuntimeError as exc:
+        logger.error("Inicialização abortada: %s", exc)
+        raise SystemExit(1) from exc
 
-    bot.run(token)
+    try:
+        bot.run(token)
+    except discord.LoginFailure:
+        logger.error(
+            "Falha de autenticação Discord (401 Unauthorized). Corrija DISCORD_TOKEN e reinicie o bot."
+        )
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
