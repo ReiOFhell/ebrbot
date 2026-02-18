@@ -55,6 +55,31 @@ EMBED_COLOR = discord.Color.from_rgb(45, 18, 54)
 ERROR_TEXT = "O Grimório está em silêncio."
 
 
+PLAYERS_COLUMNS: dict[str, str] = {
+    "user_id": "TEXT PRIMARY KEY",
+    "classe": "TEXT NOT NULL",
+    "is_excecao": "INTEGER DEFAULT 0",
+    "nivel": "TEXT",
+    "criado_em": "TEXT",
+    "forca": "TEXT",
+    "resistencia": "TEXT",
+    "agilidade": "TEXT",
+    "inteligencia": "TEXT",
+    "mana": "TEXT",
+    "crescimento": "TEXT",
+    "titulo": "TEXT",
+    "lore_texto": "TEXT",
+    "pressagio": "TEXT",
+}
+
+ANNALS_COLUMNS: dict[str, str] = {
+    "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
+    "user_id": "TEXT NOT NULL",
+    "entrada": "TEXT NOT NULL",
+    "criado_em": "TEXT NOT NULL",
+}
+
+
 def build_error_text(tag: str) -> str:
     return f"O Grimório está em silêncio. Selo de falha: {tag}."
 
@@ -110,12 +135,57 @@ def get_conn() -> sqlite3.Connection:
     return sqlite3.connect(db_file)
 
 
+
+
+def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {row[1] for row in rows}
+
+
+def ensure_table_schema(conn: sqlite3.Connection, table_name: str, columns: dict[str, str]) -> None:
+    existing = table_columns(conn, table_name)
+    if not existing:
+        return
+
+    for name, ddl in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {ddl}")
+
+
+def recreate_if_corrupt(conn: sqlite3.Connection) -> None:
+    try:
+        row = conn.execute("PRAGMA integrity_check").fetchone()
+        if not row or row[0] != "ok":
+            raise sqlite3.DatabaseError("integrity_check failed")
+    except sqlite3.DatabaseError:
+        db_file = resolve_db_path()
+        logger.exception("Banco corrompido detectado; recriando em %s", db_file)
+        conn.close()
+        db_file.unlink(missing_ok=True)
+
+
+def with_db_retry(fn):
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if "no such table" in message or "no such column" in message:
+                logger.warning("Schema desatualizado detectado; reexecutando init_db e retry: %s", exc)
+                init_db()
+                return fn(*args, **kwargs)
+            raise
+
+    return wrapper
+
 # ============================================================
 # 4) BANCO (SQLITE HELPERS)
 # ============================================================
 def init_db() -> None:
     resolve_db_path()
     with get_conn() as conn:
+        recreate_if_corrupt(conn)
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS players (
@@ -146,9 +216,12 @@ def init_db() -> None:
             )
             """
         )
+        ensure_table_schema(conn, "players", PLAYERS_COLUMNS)
+        ensure_table_schema(conn, "annals", ANNALS_COLUMNS)
         conn.commit()
 
 
+@with_db_retry
 def get_player(user_id: str) -> dict[str, Any] | None:
     with get_conn() as conn:
         conn.row_factory = sqlite3.Row
@@ -156,6 +229,7 @@ def get_player(user_id: str) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
+@with_db_retry
 def create_player(
     user_id: str,
     classe_id: str,
@@ -202,6 +276,7 @@ def create_player(
         conn.commit()
 
 
+@with_db_retry
 def delete_player(user_id: str) -> None:
     with get_conn() as conn:
         conn.execute("DELETE FROM players WHERE user_id = ?", (user_id,))
@@ -209,10 +284,12 @@ def delete_player(user_id: str) -> None:
         conn.commit()
 
 
+@with_db_retry
 def player_exists(user_id: str) -> bool:
     return get_player(user_id) is not None
 
 
+@with_db_retry
 def create_inkosi_record_if_needed(user_id: str) -> dict[str, Any]:
     existing = get_player(user_id)
     if existing:
@@ -236,6 +313,7 @@ def create_inkosi_record_if_needed(user_id: str) -> dict[str, Any]:
     return get_player(user_id) or {}
 
 
+@with_db_retry
 def add_annal_entry(user_id: str, entrada: str) -> None:
     with get_conn() as conn:
         conn.execute(
@@ -245,6 +323,7 @@ def add_annal_entry(user_id: str, entrada: str) -> None:
         conn.commit()
 
 
+@with_db_retry
 def get_annals(user_id: str, limit: int = 5) -> list[dict[str, Any]]:
     with get_conn() as conn:
         conn.row_factory = sqlite3.Row
@@ -255,6 +334,7 @@ def get_annals(user_id: str, limit: int = 5) -> list[dict[str, Any]]:
         return [dict(r) for r in rows]
 
 
+@with_db_retry
 def get_player_counts_by_class() -> list[dict[str, Any]]:
     with get_conn() as conn:
         conn.row_factory = sqlite3.Row
@@ -444,11 +524,14 @@ def register_class_for_user(user_id: str, classe_id: str) -> tuple[bool, str]:
             lore_texto=data["lore_texto"],
             pressagio=data["pressagio"],
         )
-        add_annal_entry(user_id, f"Ritual do Despertar concluído. Caminho selado: {data['nome']}.")
+        try:
+            add_annal_entry(user_id, f"Ritual do Despertar concluído. Caminho selado: {data['nome']}.")
+        except sqlite3.Error:
+            logger.exception("Falha ao registrar entrada nos Anais; cadastro principal mantido")
         return True, data["nome"]
     except sqlite3.Error:
         logger.exception("Falha SQLite ao registrar classe")
-        return False, "Falha no arquivo do Grimório (SQLite). Defina EBR_DATA_DIR em pasta gravável e reinicie."
+        return False, "Falha temporária de persistência do Grimório. Tente novamente em alguns segundos."
 
 # ============================================================
 # 6) UI (CLASSEVIEW)
@@ -554,7 +637,7 @@ async def iniciar(ctx: commands.Context) -> None:
             except sqlite3.Error:
                 logger.exception("Falha SQLite ao criar registro Inkosi")
                 await send_grimoire_error(ctx, "iniciar.db")
-                await ctx.send("Dica técnica: configure `EBR_DATA_DIR` para um diretório gravável no host.")
+                await ctx.send("Persistência indisponível no momento. O arquivo será refeito automaticamente ao reiniciar.")
                 return
 
             embed = discord.Embed(
