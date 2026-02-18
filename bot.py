@@ -343,6 +343,69 @@ PHASE_2_FOUNDATIONS = [
 ]
 
 
+
+
+def build_iniciar_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="RITUAL DO DESPERTAR",
+        description=(
+            "**Ato I — O Mundo**\n"
+            "No EBR, impérios se erguem sobre juramentos antigos e sombras disciplinadas.\n"
+            "Cada nome inscrito altera o peso da noite.\n\n"
+            "**Ato II — A Testemunha**\n"
+            "O Grimório observa teu passo, mede teu silêncio e recolhe teu primeiro voto.\n"
+            "Nada do que fores será esquecido.\n\n"
+            "**Ato III — A Escolha**\n"
+            "Diante dos selos, escolhe teu Caminho.\n"
+            "A escolha é única. O destino não admite rascunhos."
+        ),
+        color=EMBED_COLOR,
+    )
+    for data in CLASSES.values():
+        embed.add_field(name=f"{data['icone']} {data['nome']}", value=data["frase"], inline=False)
+
+    embed.set_footer(text="FASE 1 — Núcleo do Jogador • O destino começa aqui")
+    return embed
+
+
+def normalize_class_input(raw: str) -> str:
+    aliases = {
+        "guerreiro": "guerreiro",
+        "mago": "mago",
+        "cacador": "cacador",
+        "caçador": "cacador",
+        "soldado": "soldado",
+        "explorador": "explorador",
+    }
+    return aliases.get(raw.strip().lower(), "")
+
+
+def register_class_for_user(user_id: str, classe_id: str) -> tuple[bool, str]:
+    if user_id == INKOSI_ID:
+        return False, "A assinatura ABSOLUTA não pode ser definida por escolha comum."
+    if player_exists(user_id):
+        return False, "Teu destino já foi inscrito. O Grimório não aceita duplicatas."
+
+    data = CLASSES[classe_id]
+    attrs = data["atributos"]
+    create_player(
+        user_id=user_id,
+        classe_id=classe_id,
+        is_excecao=0,
+        nivel="1",
+        forca=attrs["FOR"],
+        resistencia=attrs["RES"],
+        agilidade=attrs["AGI"],
+        inteligencia=attrs["INT"],
+        mana=attrs["MAN"],
+        crescimento=data["crescimento"],
+        titulo=data["titulo"],
+        lore_texto=data["lore_texto"],
+        pressagio=data["pressagio"],
+    )
+    add_annal_entry(user_id, f"Ritual do Despertar concluído. Caminho selado: {data['nome']}.")
+    return True, data["nome"]
+
 # ============================================================
 # 6) UI (CLASSEVIEW)
 # ============================================================
@@ -376,28 +439,12 @@ class ClasseView(discord.ui.View):
                 )
                 return
 
-            base = CLASSES[classe_id]
-            attrs = base["atributos"]
-            create_player(
-                user_id=user_id,
-                classe_id=classe_id,
-                is_excecao=0,
-                nivel="1",
-                forca=attrs["FOR"],
-                resistencia=attrs["RES"],
-                agilidade=attrs["AGI"],
-                inteligencia=attrs["INT"],
-                mana=attrs["MAN"],
-                crescimento=base["crescimento"],
-                titulo=base["titulo"],
-                lore_texto=base["lore_texto"],
-                pressagio=base["pressagio"],
-            )
+            ok, result = register_class_for_user(user_id, classe_id)
+            if not ok:
+                await interaction.response.send_message(result, ephemeral=True)
+                return
 
-            add_annal_entry(
-                user_id,
-                f"Ritual do Despertar concluído. Caminho selado: {base['nome']}.",
-            )
+            base = CLASSES[classe_id]
 
             for child in self.children:
                 if isinstance(child, discord.ui.Button):
@@ -502,6 +549,43 @@ async def iniciar(ctx: commands.Context) -> None:
     except Exception:
         logger.exception("Falha no comando !iniciar")
         await send_grimoire_error(ctx, "iniciar")
+
+
+
+
+@bot.command(name="classe")
+async def classe(ctx: commands.Context, *, classe_id: str | None = None) -> None:
+    try:
+        if not classe_id:
+            await ctx.send("Uso: `!classe <guerreiro|mago|cacador|soldado|explorador>`")
+            return
+
+        user_id = str(ctx.author.id)
+        cid = normalize_class_input(classe_id)
+        if not cid or cid not in CLASSES:
+            await ctx.send("Classe inválida. Opções: guerreiro, mago, cacador, soldado, explorador.")
+            return
+
+        ok, result = register_class_for_user(user_id, cid)
+        if not ok:
+            await ctx.send(result)
+            return
+
+        data = CLASSES[cid]
+        embed = discord.Embed(
+            title="RITUAL CONCLUÍDO",
+            description=(
+                f"**{ctx.author.display_name}** foi inscrito no Grimório como **{result}**.\n"
+                "O selo foi firmado por liturgia textual, sem painel arcano."
+            ),
+            color=EMBED_COLOR,
+        )
+        embed.add_field(name="Título", value=data["titulo"], inline=False)
+        embed.set_footer(text="FASE 1 — Núcleo do Jogador • Juramento selado")
+        await ctx.send(embed=embed)
+    except Exception:
+        logger.exception("Falha no comando !classe")
+        await send_grimoire_error(ctx, "classe")
 
 
 @bot.command(name="perfil")
