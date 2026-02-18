@@ -45,6 +45,14 @@ EMBED_COLOR = discord.Color.from_rgb(45, 18, 54)
 ERROR_TEXT = "O Grimório está em silêncio."
 
 
+def build_error_text(tag: str) -> str:
+    return f"O Grimório está em silêncio. Selo de falha: {tag}."
+
+
+async def send_grimoire_error(ctx: commands.Context, tag: str) -> None:
+    await ctx.send(build_error_text(tag))
+
+
 def resolve_token() -> str:
     token_env = (DISCORD_TOKEN or "").strip().strip('"').strip("'")
     token_fallback = (DISCORD_TOKEN_FALLBACK or "").strip().strip('"').strip("'")
@@ -411,9 +419,9 @@ class ClasseView(discord.ui.View):
         except Exception:
             logger.exception("Falha ao escolher classe")
             if interaction.response.is_done():
-                await interaction.followup.send(ERROR_TEXT, ephemeral=True)
+                await interaction.followup.send(build_error_text("BTN"), ephemeral=True)
             else:
-                await interaction.response.send_message(ERROR_TEXT, ephemeral=True)
+                await interaction.response.send_message(build_error_text("BTN"), ephemeral=True)
 
     @discord.ui.button(label="Guerreiro", style=discord.ButtonStyle.danger)
     async def guerreiro_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -493,7 +501,7 @@ async def iniciar(ctx: commands.Context) -> None:
         await ctx.send(embed=embed, view=ClasseView(author_id=ctx.author.id))
     except Exception:
         logger.exception("Falha no comando !iniciar")
-        await ctx.send(ERROR_TEXT)
+        await send_grimoire_error(ctx, "iniciar")
 
 
 @bot.command(name="perfil")
@@ -569,7 +577,7 @@ async def perfil(ctx: commands.Context) -> None:
         await ctx.send(embed=embed)
     except Exception:
         logger.exception("Falha no comando !perfil")
-        await ctx.send(ERROR_TEXT)
+        await send_grimoire_error(ctx, "perfil")
 
 
 @bot.command(name="resetar")
@@ -596,7 +604,7 @@ async def resetar(ctx: commands.Context, membro: discord.Member) -> None:
         )
     except Exception:
         logger.exception("Falha no comando !resetar")
-        await ctx.send(ERROR_TEXT)
+        await send_grimoire_error(ctx, "resetar")
 
 
 @resetar.error
@@ -607,7 +615,7 @@ async def resetar_error(ctx: commands.Context, error: commands.CommandError) -> 
         await ctx.send("Uso correto: `!resetar @membro`")
     else:
         logger.exception("Erro não tratado em !resetar", exc_info=error)
-        await ctx.send(ERROR_TEXT)
+        await send_grimoire_error(ctx, "resetar.error")
 
 
 @bot.command(name="eu")
@@ -807,7 +815,7 @@ async def diario(ctx: commands.Context, *, texto: str | None = None) -> None:
         await ctx.send("Entrada gravada nos Anais. O Grimório testemunhou tuas palavras.")
     except Exception:
         logger.exception("Falha no comando !diario")
-        await ctx.send(ERROR_TEXT)
+        await send_grimoire_error(ctx, "diario")
 
 
 @bot.command(name="anais")
@@ -840,7 +848,7 @@ async def anais(ctx: commands.Context, membro: discord.Member | None = None) -> 
         await ctx.send(embed=embed)
     except Exception:
         logger.exception("Falha no comando !anais")
-        await ctx.send(ERROR_TEXT)
+        await send_grimoire_error(ctx, "anais")
 
 
 @bot.command(name="relatorio")
@@ -868,7 +876,7 @@ async def relatorio(ctx: commands.Context) -> None:
         await ctx.send(embed=embed)
     except Exception:
         logger.exception("Falha no comando !relatorio")
-        await ctx.send(ERROR_TEXT)
+        await send_grimoire_error(ctx, "relatorio")
 
 
 @relatorio.error
@@ -877,7 +885,7 @@ async def relatorio_error(ctx: commands.Context, error: commands.CommandError) -
         await ctx.send("Somente administradores podem invocar `!relatorio`.")
     else:
         logger.exception("Erro não tratado em !relatorio", exc_info=error)
-        await ctx.send(ERROR_TEXT)
+        await send_grimoire_error(ctx, "relatorio.error")
 
 
 # ============================================================
@@ -886,6 +894,19 @@ async def relatorio_error(ctx: commands.Context, error: commands.CommandError) -
 @bot.event
 async def on_ready() -> None:
     logger.info("Bot conectado como %s (%s)", bot.user, bot.user.id if bot.user else "?")
+
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if isinstance(error, commands.CommandNotFound):
+        return
+    if isinstance(error, commands.CheckFailure):
+        return
+    if isinstance(error, commands.MissingRequiredArgument):
+        return
+
+    logger.exception("Erro global de comando: %s", error)
+    await send_grimoire_error(ctx, "global")
 
 
 # ============================================================
