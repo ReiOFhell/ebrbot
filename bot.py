@@ -209,6 +209,43 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS council_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                week_key TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL,
+                opened_by TEXT,
+                opened_at TEXT NOT NULL,
+                closed_at TEXT,
+                winning_option TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS council_votes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                user_id TEXT NOT NULL,
+                option_key TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(session_id, user_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS global_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                detail TEXT,
+                actor_user_id TEXT,
+                created_em TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS failure_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 command_name TEXT NOT NULL,
@@ -416,6 +453,124 @@ def build_oraculo_message(world_state: dict[str, Any]) -> str:
     )
 
 
+def add_global_event(event_type: str, title: str, detail: str, actor_user_id: str | None = None) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO global_events (event_type, title, detail, actor_user_id, created_em)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (event_type, title, detail, actor_user_id, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+
+
+def get_global_events(limit: int = 20) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT event_type, title, detail, actor_user_id, created_em FROM global_events ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def week_key_utc() -> str:
+    now = datetime.now(timezone.utc)
+    year, week, _ = now.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def close_stale_council_sessions(current_week_key: str) -> None:
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        stale = conn.execute(
+            "SELECT * FROM council_sessions WHERE status = 'open' AND week_key <> ?",
+            (current_week_key,),
+        ).fetchall()
+
+    for row in stale:
+        finalize_council_session(dict(row), actor_user_id="SYSTEM")
+
+
+def ensure_current_council_session(opened_by: str | None = None) -> dict[str, Any]:
+    wk = week_key_utc()
+    close_stale_council_sessions(wk)
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM council_sessions WHERE week_key = ?", (wk,)).fetchone()
+        if row:
+            return dict(row)
+
+        conn.execute(
+            "INSERT INTO council_sessions (week_key, status, opened_by, opened_at) VALUES (?, 'open', ?, ?)",
+            (wk, opened_by, now),
+        )
+        conn.commit()
+        created = conn.execute("SELECT * FROM council_sessions WHERE week_key = ?", (wk,)).fetchone()
+        return dict(created) if created else {}
+
+
+def get_council_vote_counts(session_id: int) -> dict[str, int]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT option_key, COUNT(*) FROM council_votes WHERE session_id = ? GROUP BY option_key",
+            (session_id,),
+        ).fetchall()
+    counts = {k: 0 for k in COUNCIL_OPTIONS}
+    for option_key, qty in rows:
+        counts[str(option_key)] = int(qty)
+    return counts
+
+
+def register_council_vote(session_id: int, user_id: str, option_key: str) -> tuple[bool, str]:
+    if option_key not in COUNCIL_OPTIONS:
+        return False, "Opção de conselho inválida."
+
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM council_votes WHERE session_id = ? AND user_id = ?",
+            (session_id, user_id),
+        ).fetchone()
+        if existing:
+            return False, "Teu voto nesta semana já foi registrado; o Conselho não aceita duplicatas."
+
+        conn.execute(
+            "INSERT INTO council_votes (session_id, user_id, option_key, created_at) VALUES (?, ?, ?, ?)",
+            (session_id, user_id, option_key, now),
+        )
+        conn.commit()
+    return True, COUNCIL_OPTIONS[option_key]["label"]
+
+
+def finalize_council_session(session: dict[str, Any], actor_user_id: str) -> tuple[bool, str]:
+    if not session or session.get("status") != "open":
+        return False, "Não há votação semanal aberta para encerrar."
+
+    session_id = int(session["id"])
+    counts = get_council_vote_counts(session_id)
+    winner_key = max(counts, key=lambda key: counts[key])
+    winner = COUNCIL_OPTIONS[winner_key]
+
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE council_sessions SET status = 'closed', closed_at = ?, winning_option = ? WHERE id = ?",
+            (datetime.now(timezone.utc).isoformat(), winner_key, session_id),
+        )
+        ensure_world_state_row(conn)
+        conn.execute(
+            "UPDATE world_state SET tensao_fronteiras = ?, faccao_ascensao = ?, atualizado_em = ? WHERE singleton_id = 1",
+            (winner["tensao"], winner["faccao"], datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+
+    detail = f"Resultado semanal: {winner['label']} (tensão {winner['tensao']})."
+    add_global_event("conselho", "Resultado do Conselho", detail, actor_user_id=actor_user_id)
+    return True, detail
+
+
 def get_db_diagnostics() -> dict[str, Any]:
     db_exists = DB_PATH.exists()
     data_dir_exists = DATA_DIR.exists()
@@ -560,6 +715,14 @@ TENSION_ORACLE_LINES: dict[str, str] = {
     "MÉDIA": "As fronteiras vibram em alerta disciplinado; cada passo errado pode acender um novo decreto.",
     "ALTA": "As fronteiras ardem sob aço e presságios; o Império exige vigilância absoluta dos despertos.",
 }
+
+COUNCIL_OPTIONS: dict[str, dict[str, str]] = {
+    "vigia": {"label": "Vigia das Fronteiras", "tensao": "ALTA", "faccao": "Legião da Vigília"},
+    "diplomacia": {"label": "Pacto de Diplomacia", "tensao": "BAIXA", "faccao": "Casa das Embaixadas"},
+    "equilibrio": {"label": "Trégua Calculada", "tensao": "MÉDIA", "faccao": "Ordem do Equilíbrio"},
+}
+
+INTRIGA_TYPES = {"rumor", "denuncia", "alianca", "ameaca"}
 
 
 def build_iniciar_embed() -> discord.Embed:
@@ -1007,6 +1170,126 @@ async def oraculo(ctx: commands.Context) -> None:
         await send_grimoire_error(ctx, "oraculo", command_name="oraculo", user_id=str(ctx.author.id), error=exc)
 
 
+@bot.command(name="conselho")
+async def conselho(ctx: commands.Context, *, escolha: str | None = None) -> None:
+    try:
+        session = ensure_current_council_session(opened_by=str(ctx.author.id))
+        if not session:
+            await ctx.send(canon_line("erro", "O Conselho não pôde ser convocado."))
+            return
+
+        if not escolha:
+            counts = get_council_vote_counts(int(session["id"]))
+            opcoes = "\n".join(
+                f"• `{key}` — {meta['label']} ({counts.get(key, 0)} voto(s))"
+                for key, meta in COUNCIL_OPTIONS.items()
+            )
+            await ctx.send(
+                canon_line(
+                    "abertura",
+                    f"Conselho semanal `{session['week_key']}` aberto.\n{opcoes}\n\nVote com `!conselho <opção>`.",
+                )
+            )
+            return
+
+        escolha_norm = escolha.strip().lower()
+        if escolha_norm == "encerrar":
+            if not ctx.author.guild_permissions.administrator:
+                await ctx.send(canon_line("recusa", "Somente administradores podem encerrar o Conselho semanal."))
+                return
+            ok, msg = finalize_council_session(session, actor_user_id=str(ctx.author.id))
+            await ctx.send(canon_line("sucesso" if ok else "recusa", msg))
+            return
+
+        ok, result = register_council_vote(int(session["id"]), str(ctx.author.id), escolha_norm)
+        await ctx.send(canon_line("sucesso" if ok else "recusa", result if not ok else f"Voto selado em **{result}**."))
+    except Exception as exc:
+        logger.exception("Falha no comando !conselho")
+        await send_grimoire_error(ctx, "conselho", command_name="conselho", user_id=str(ctx.author.id), error=exc)
+
+
+@bot.command(name="decreto")
+@commands.has_permissions(administrator=True)
+async def decreto(ctx: commands.Context, *, texto: str) -> None:
+    try:
+        conteudo = texto.strip()
+        if len(conteudo) < 5:
+            await ctx.send(canon_line("recusa", "Informe um decreto mais completo (mínimo de 5 caracteres)."))
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        with get_conn() as conn:
+            ensure_world_state_row(conn)
+            conn.execute(
+                "UPDATE world_state SET decreto_ativo = ?, atualizado_em = ? WHERE singleton_id = 1",
+                (conteudo, now),
+            )
+            conn.commit()
+
+        add_global_event("decreto", "Decreto Imperial", conteudo, actor_user_id=str(ctx.author.id))
+        await ctx.send(canon_line("sucesso", f"Novo decreto selado:\n**{conteudo}**"))
+    except Exception as exc:
+        logger.exception("Falha no comando !decreto")
+        await send_grimoire_error(ctx, "decreto", command_name="decreto", user_id=str(ctx.author.id), error=exc)
+
+
+@decreto.error
+async def decreto_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send(canon_line("recusa", "Somente administradores podem decretar a vontade imperial."))
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(canon_line("recusa", "Uso: `!decreto <texto>`."))
+    else:
+        logger.exception("Erro não tratado em !decreto", exc_info=error)
+        await send_grimoire_error(ctx, "decreto.error", command_name="decreto.error", user_id=str(ctx.author.id), error=error)
+
+
+@bot.command(name="intriga")
+async def intriga(ctx: commands.Context, *, linha: str | None = None) -> None:
+    try:
+        if not linha:
+            await ctx.send(canon_line("recusa", "Uso: `!intriga <rumor|denuncia|alianca|ameaca> <texto>`."))
+            return
+
+        partes = linha.strip().split(maxsplit=1)
+        tipo = partes[0].lower()
+        texto = partes[1].strip() if len(partes) > 1 else ""
+
+        if tipo not in INTRIGA_TYPES or not texto:
+            await ctx.send(canon_line("recusa", "Formato inválido. Exemplo: `!intriga rumor Tropas vistas no norte`."))
+            return
+
+        titulo = f"Intriga — {tipo.title()}"
+        add_global_event("intriga", titulo, texto, actor_user_id=str(ctx.author.id))
+        await ctx.send(canon_line("sucesso", f"Intriga registrada nos Anais Globais como **{tipo}**."))
+    except Exception as exc:
+        logger.exception("Falha no comando !intriga")
+        await send_grimoire_error(ctx, "intriga", command_name="intriga", user_id=str(ctx.author.id), error=exc)
+
+
+@bot.command(name="anaisglobal")
+async def anaisglobal(ctx: commands.Context) -> None:
+    try:
+        eventos = get_global_events(limit=15)
+        if not eventos:
+            await ctx.send(canon_line("abertura", "Os Anais Globais ainda não receberam decretos, conselhos ou intrigas."))
+            return
+
+        linhas = [
+            f"`{e['created_em'][:10]}` • **{e['event_type'].upper()}** • {e['title']}\n{(e['detail'] or '').strip()}"
+            for e in eventos
+            if e["event_type"] in {"decreto", "conselho", "intriga"}
+        ]
+        if not linhas:
+            await ctx.send(canon_line("abertura", "Nenhum evento político disponível nos Anais Globais."))
+            return
+
+        await ctx.send(canon_line("abertura", "**Anais Globais do Império**\n" + "\n\n".join(linhas[:10])))
+    except Exception as exc:
+        logger.exception("Falha no comando !anaisglobal")
+        await send_grimoire_error(ctx, "anaisglobal", command_name="anaisglobal", user_id=str(ctx.author.id), error=exc)
+
+
 @bot.command(name="perfil")
 async def perfil(ctx: commands.Context) -> None:
     try:
@@ -1090,10 +1373,10 @@ async def eu(ctx: commands.Context) -> None:
 @bot.command(name="changelog")
 async def changelog(ctx: commands.Context) -> None:
     embed = discord.Embed(title="Changelog — Núcleo do Jogador", color=EMBED_COLOR)
-    embed.description = """**Etapa 2 — Estado do Mundo**
-• `world_state` persistente (época, decreto, tensão e facção em ascensão)
-• `!oraculo` responde com base no estado do mundo (não RNG puro)
-• respostas canônicas e coerentes entre invocações"""
+    embed.description = """**Etapa 3 — Política semanal**
+• `!conselho` abre votação semanal com opções fixas e evita voto duplicado
+• `!decreto <texto>` (admin) altera o mundo e entra nos Anais Globais
+• `!intriga` e `!anaisglobal` consolidam os eventos políticos do Império"""
     embed.set_footer(text="EBR • Base estável")
     await ctx.send(embed=embed)
 
@@ -1168,8 +1451,8 @@ async def guia(ctx: commands.Context) -> None:
         description="Fase estável ativa: identidade canônica e registros persistentes.",
         color=EMBED_COLOR,
     )
-    embed.add_field(name="Comandos", value="`!iniciar` • `!classe` • `!juramento` • `!trilha` • `!legado` • `!oraculo` • `!perfil` • `!resetar @membro` • `!eu` • `!changelog` • `!guia` • `!diagnostico`", inline=False)
-    embed.add_field(name="Estado Atual", value="Etapa 2: estado do mundo persistente com oráculo canônico.", inline=False)
+    embed.add_field(name="Comandos", value="`!iniciar` • `!classe` • `!juramento` • `!trilha` • `!legado` • `!oraculo` • `!conselho` • `!decreto` • `!intriga` • `!anaisglobal` • `!perfil` • `!resetar @membro` • `!eu` • `!changelog` • `!guia` • `!diagnostico`", inline=False)
+    embed.add_field(name="Estado Atual", value="Etapa 3: política semanal com Conselho, Decreto e Intriga persistentes.", inline=False)
     embed.set_footer(text="EBR • Orientação oficial")
     await ctx.send(embed=embed)
 
