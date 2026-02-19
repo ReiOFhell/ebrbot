@@ -136,6 +136,12 @@ def ensure_columns(conn: sqlite3.Connection) -> None:
         "titulo": "TEXT",
         "lore_texto": "TEXT",
         "pressagio": "TEXT",
+        # Compatibilidade com schemas legados de versões anteriores (Fase 2 revertida)
+        "ouro": "INTEGER NOT NULL DEFAULT 0",
+        "prestigio": "INTEGER NOT NULL DEFAULT 0",
+        "last_aventura_at": "TEXT",
+        "streak_aventura": "INTEGER NOT NULL DEFAULT 0",
+        "total_aventuras": "INTEGER NOT NULL DEFAULT 0",
     }
     cols = {row[1] for row in conn.execute("PRAGMA table_info(players)").fetchall()}
     for name, ddl in required.items():
@@ -220,9 +226,10 @@ def create_player(
             INSERT OR REPLACE INTO players (
                 user_id, classe, is_excecao, nivel, criado_em,
                 forca, resistencia, agilidade, inteligencia, mana,
-                crescimento, titulo, lore_texto, pressagio
+                crescimento, titulo, lore_texto, pressagio,
+                ouro, prestigio, last_aventura_at, streak_aventura, total_aventuras
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -239,6 +246,11 @@ def create_player(
                 titulo,
                 lore_texto,
                 pressagio,
+                0,
+                0,
+                None,
+                0,
+                0,
             ),
         )
         conn.commit()
