@@ -197,6 +197,19 @@ def init_db() -> None:
         conn.commit()
 
 
+def get_players_table_info() -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute("PRAGMA table_info(players)").fetchall()
+
+
+def fallback_value_for_required_column(column: sqlite3.Row) -> Any:
+    declared_type = str(column["type"] or "").upper()
+    if any(token in declared_type for token in ("INT", "REAL", "NUM")):
+        return 0
+    return ""
+
+
 def get_player(user_id: str) -> dict[str, Any] | None:
     with get_conn() as conn:
         conn.row_factory = sqlite3.Row
@@ -220,39 +233,52 @@ def create_player(
     lore_texto: str,
     pressagio: str,
 ) -> None:
+    base_values: dict[str, Any] = {
+        "user_id": user_id,
+        "classe": classe_id,
+        "is_excecao": is_excecao,
+        "nivel": nivel,
+        "criado_em": datetime.now(timezone.utc).isoformat(),
+        "forca": forca,
+        "resistencia": resistencia,
+        "agilidade": agilidade,
+        "inteligencia": inteligencia,
+        "mana": mana,
+        "crescimento": crescimento,
+        "titulo": titulo,
+        "lore_texto": lore_texto,
+        "pressagio": pressagio,
+        # compat legada
+        "ouro": 0,
+        "prestigio": 0,
+        "last_aventura_at": "",
+        "streak_aventura": 0,
+        "total_aventuras": 0,
+    }
+
+    table_info = get_players_table_info()
+    columns: list[str] = []
+    values: list[Any] = []
+    for row in table_info:
+        col = row["name"]
+        notnull = int(row["notnull"]) == 1
+        default = row["dflt_value"]
+
+        if col in base_values:
+            columns.append(col)
+            values.append(base_values[col])
+        elif notnull and default is None:
+            columns.append(col)
+            values.append(fallback_value_for_required_column(row))
+
+    if not columns:
+        raise RuntimeError("Schema inválido: tabela players sem colunas utilizáveis para INSERT.")
+
+    placeholders = ", ".join(["?"] * len(columns))
+    sql = f"INSERT OR REPLACE INTO players ({', '.join(columns)}) VALUES ({placeholders})"
+
     with get_conn() as conn:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO players (
-                user_id, classe, is_excecao, nivel, criado_em,
-                forca, resistencia, agilidade, inteligencia, mana,
-                crescimento, titulo, lore_texto, pressagio,
-                ouro, prestigio, last_aventura_at, streak_aventura, total_aventuras
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                user_id,
-                classe_id,
-                is_excecao,
-                nivel,
-                datetime.now(timezone.utc).isoformat(),
-                forca,
-                resistencia,
-                agilidade,
-                inteligencia,
-                mana,
-                crescimento,
-                titulo,
-                lore_texto,
-                pressagio,
-                0,
-                0,
-                None,
-                0,
-                0,
-            ),
-        )
+        conn.execute(sql, values)
         conn.commit()
 
 
