@@ -526,10 +526,14 @@ async def iniciar(ctx: commands.Context) -> None:
         embed = build_iniciar_embed()
         try:
             await ctx.send(embed=embed, view=ClasseView(author_id=ctx.author.id))
-        except discord.HTTPException:
+        except Exception as view_exc:
             logger.exception("Falha ao enviar painel de classes; usando fallback textual")
-            await ctx.send(embed=embed)
-            await ctx.send(canon_line("recusa", "Painel ritual indisponível. Usa `!classe <guerreiro|mago|cacador|soldado|explorador>`."))
+            try:
+                await ctx.send(embed=embed)
+                await ctx.send(canon_line("recusa", "Painel ritual indisponível. Usa `!classe <guerreiro|mago|cacador|soldado|explorador>`."))
+            except Exception:
+                logger.exception("Fallback textual do !iniciar também falhou")
+                raise view_exc
     except Exception as exc:
         logger.exception("Falha no comando !iniciar")
         await send_grimoire_error(ctx, "iniciar", command_name="iniciar", user_id=str(ctx.author.id), error=exc)
