@@ -144,6 +144,8 @@ def ensure_columns(conn: sqlite3.Connection) -> None:
         "total_aventuras": "INTEGER NOT NULL DEFAULT 0",
         "juramento": "TEXT",
         "juramento_escolhido_em": "TEXT",
+        "faccao_alinhada": "TEXT",
+        "faccao_alinhada_em": "TEXT",
     }
     cols = {row[1] for row in conn.execute("PRAGMA table_info(players)").fetchall()}
     for name, ddl in required.items():
@@ -246,6 +248,17 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS player_faction_reputation (
+                user_id TEXT NOT NULL,
+                faction_key TEXT NOT NULL,
+                points INTEGER NOT NULL DEFAULT 0,
+                updated_em TEXT NOT NULL,
+                PRIMARY KEY (user_id, faction_key)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS failure_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 command_name TEXT NOT NULL,
@@ -318,6 +331,8 @@ def create_player(
         "total_aventuras": 0,
         "juramento": "",
         "juramento_escolhido_em": "",
+        "faccao_alinhada": "",
+        "faccao_alinhada_em": "",
     }
 
     table_info = get_players_table_info()
@@ -388,6 +403,7 @@ def delete_player(user_id: str) -> None:
         conn.execute("DELETE FROM players WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM annals WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM player_marcos WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM player_faction_reputation WHERE user_id = ?", (user_id,))
         conn.commit()
 
 
@@ -571,6 +587,67 @@ def finalize_council_session(session: dict[str, Any], actor_user_id: str) -> tup
     return True, detail
 
 
+def set_player_faction_alignment(user_id: str, faction_key: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE players SET faccao_alinhada = ?, faccao_alinhada_em = ? WHERE user_id = ?",
+            (faction_key, now, user_id),
+        )
+        conn.commit()
+
+
+def get_player_faction_points(user_id: str) -> dict[str, int]:
+    points = {key: 0 for key in FACTIONS}
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT faction_key, points FROM player_faction_reputation WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+    for faction_key, value in rows:
+        if faction_key in points:
+            points[faction_key] = int(value)
+    return points
+
+
+def add_faction_reputation(user_id: str, faction_key: str, delta: int) -> int:
+    if faction_key not in FACTIONS:
+        raise ValueError("Facção inválida.")
+
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT points FROM player_faction_reputation WHERE user_id = ? AND faction_key = ?",
+            (user_id, faction_key),
+        ).fetchone()
+        current = int(row[0]) if row else 0
+        updated = current + delta
+        conn.execute(
+            """
+            INSERT INTO player_faction_reputation (user_id, faction_key, points, updated_em)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, faction_key) DO UPDATE SET
+                points = excluded.points,
+                updated_em = excluded.updated_em
+            """,
+            (user_id, faction_key, updated, now),
+        )
+        conn.commit()
+    return updated
+
+
+def reputation_label(points: int) -> str:
+    if points < -20:
+        return "Hostil"
+    if points < 0:
+        return "Suspeito"
+    if points < 30:
+        return "Tolerado"
+    if points < 70:
+        return "Honrado"
+    return "Consagrado"
+
+
 def get_db_diagnostics() -> dict[str, Any]:
     db_exists = DB_PATH.exists()
     data_dir_exists = DATA_DIR.exists()
@@ -723,6 +800,15 @@ COUNCIL_OPTIONS: dict[str, dict[str, str]] = {
 }
 
 INTRIGA_TYPES = {"rumor", "denuncia", "alianca", "ameaca"}
+
+FACTIONS: dict[str, str] = {
+    "legiao": "Legião da Vigília",
+    "embaixadas": "Casa das Embaixadas",
+    "equilibrio": "Ordem do Equilíbrio",
+    "lanternas": "Casa das Lanternas",
+}
+
+MANDATO_TYPES = {"acordo", "mediacao", "patrulha", "diplomacia", "protocolo"}
 
 
 def build_iniciar_embed() -> discord.Embed:
@@ -1272,13 +1358,13 @@ async def anaisglobal(ctx: commands.Context) -> None:
     try:
         eventos = get_global_events(limit=15)
         if not eventos:
-            await ctx.send(canon_line("abertura", "Os Anais Globais ainda não receberam decretos, conselhos ou intrigas."))
+            await ctx.send(canon_line("abertura", "Os Anais Globais ainda não receberam decretos, conselhos, intrigas ou mandatos."))
             return
 
         linhas = [
             f"`{e['created_em'][:10]}` • **{e['event_type'].upper()}** • {e['title']}\n{(e['detail'] or '').strip()}"
             for e in eventos
-            if e["event_type"] in {"decreto", "conselho", "intriga"}
+            if e["event_type"] in {"decreto", "conselho", "intriga", "mandato"}
         ]
         if not linhas:
             await ctx.send(canon_line("abertura", "Nenhum evento político disponível nos Anais Globais."))
@@ -1288,6 +1374,94 @@ async def anaisglobal(ctx: commands.Context) -> None:
     except Exception as exc:
         logger.exception("Falha no comando !anaisglobal")
         await send_grimoire_error(ctx, "anaisglobal", command_name="anaisglobal", user_id=str(ctx.author.id), error=exc)
+
+
+@bot.command(name="alinhar")
+async def alinhar(ctx: commands.Context, *, faccao: str | None = None) -> None:
+    try:
+        user_id = str(ctx.author.id)
+        player = get_player(user_id)
+        if not player:
+            await ctx.send(canon_line("recusa", "Nenhum registro foi encontrado. Invoque `!iniciar` primeiro."))
+            return
+
+        if not faccao:
+            opcoes = "\n".join(f"• `{k}` — {v}" for k, v in FACTIONS.items())
+            await ctx.send(canon_line("abertura", f"Facções disponíveis:\n{opcoes}\n\nUso: `!alinhar <faccao>`."))
+            return
+
+        key = faccao.strip().lower()
+        if key not in FACTIONS:
+            await ctx.send(canon_line("recusa", "Facção inválida. Use `!alinhar` para listar as opções."))
+            return
+
+        atual = str(player.get("faccao_alinhada") or "").strip().lower()
+        if atual:
+            await ctx.send(canon_line("recusa", f"Teu alinhamento já foi selado em **{FACTIONS.get(atual, atual)}**."))
+            return
+
+        set_player_faction_alignment(user_id, key)
+        add_faction_reputation(user_id, key, 10)
+        add_global_event(
+            "alinhamento",
+            "Alinhamento de Facção",
+            f"{ctx.author.display_name} alinhou-se à {FACTIONS[key]}.",
+            actor_user_id=user_id,
+        )
+        await ctx.send(canon_line("sucesso", f"Alinhamento firmado com **{FACTIONS[key]}**."))
+    except Exception as exc:
+        logger.exception("Falha no comando !alinhar")
+        await send_grimoire_error(ctx, "alinhar", command_name="alinhar", user_id=str(ctx.author.id), error=exc)
+
+
+@bot.command(name="reputacao")
+async def reputacao(ctx: commands.Context) -> None:
+    try:
+        user_id = str(ctx.author.id)
+        player = get_player(user_id)
+        if not player:
+            await ctx.send(canon_line("recusa", "Nenhum registro foi encontrado. Invoque `!iniciar`."))
+            return
+
+        points = get_player_faction_points(user_id)
+        linhas = [f"• **{nome}**: {reputation_label(points[chave])} ({points[chave]} pts)" for chave, nome in FACTIONS.items()]
+        await ctx.send(canon_line("abertura", "**Reputação entre facções**\n" + "\n".join(linhas)))
+    except Exception as exc:
+        logger.exception("Falha no comando !reputacao")
+        await send_grimoire_error(ctx, "reputacao", command_name="reputacao", user_id=str(ctx.author.id), error=exc)
+
+
+@bot.command(name="mandato")
+async def mandato(ctx: commands.Context, *, linha: str | None = None) -> None:
+    try:
+        user_id = str(ctx.author.id)
+        player = get_player(user_id)
+        if not player:
+            await ctx.send(canon_line("recusa", "Nenhum registro foi encontrado. Invoque `!iniciar`."))
+            return
+
+        if not linha:
+            tipos = "|".join(sorted(MANDATO_TYPES))
+            await ctx.send(canon_line("recusa", f"Uso: `!mandato <{tipos}> <descrição social>`."))
+            return
+
+        partes = linha.strip().split(maxsplit=1)
+        tipo = partes[0].lower()
+        descricao = partes[1].strip() if len(partes) > 1 else ""
+        if tipo not in MANDATO_TYPES or not descricao:
+            await ctx.send(canon_line("recusa", "Formato inválido. Exemplo: `!mandato mediacao Trégua firmada na fronteira leste`."))
+            return
+
+        faccao = str(player.get("faccao_alinhada") or "").strip().lower()
+        alvo = faccao if faccao in FACTIONS else "equilibrio"
+        novo_total = add_faction_reputation(user_id, alvo, 8)
+        detalhe = f"{ctx.author.display_name} executou mandato social ({tipo}): {descricao}"
+        add_global_event("mandato", "Mandato Social", detalhe, actor_user_id=user_id)
+        add_annal_entry(user_id, f"Mandato social ({tipo}) registrado: {descricao}")
+        await ctx.send(canon_line("sucesso", f"Mandato registrado. Reputação em **{FACTIONS[alvo]}** agora é {novo_total} ({reputation_label(novo_total)})."))
+    except Exception as exc:
+        logger.exception("Falha no comando !mandato")
+        await send_grimoire_error(ctx, "mandato", command_name="mandato", user_id=str(ctx.author.id), error=exc)
 
 
 @bot.command(name="perfil")
@@ -1373,10 +1547,10 @@ async def eu(ctx: commands.Context) -> None:
 @bot.command(name="changelog")
 async def changelog(ctx: commands.Context) -> None:
     embed = discord.Embed(title="Changelog — Núcleo do Jogador", color=EMBED_COLOR)
-    embed.description = """**Etapa 3 — Política semanal**
-• `!conselho` abre votação semanal com opções fixas e evita voto duplicado
-• `!decreto <texto>` (admin) altera o mundo e entra nos Anais Globais
-• `!intriga` e `!anaisglobal` consolidam os eventos políticos do Império"""
+    embed.description = """**Etapa 4 — Facções vivas**
+• `!alinhar <faccao>` sela a facção principal do jogador
+• `!reputacao` mostra Hostil/Suspeito/Tolerado/Honrado/Consagrado por facção
+• `!mandato` concede reputação social e registra evento nos Anais"""
     embed.set_footer(text="EBR • Base estável")
     await ctx.send(embed=embed)
 
@@ -1451,8 +1625,8 @@ async def guia(ctx: commands.Context) -> None:
         description="Fase estável ativa: identidade canônica e registros persistentes.",
         color=EMBED_COLOR,
     )
-    embed.add_field(name="Comandos", value="`!iniciar` • `!classe` • `!juramento` • `!trilha` • `!legado` • `!oraculo` • `!conselho` • `!decreto` • `!intriga` • `!anaisglobal` • `!perfil` • `!resetar @membro` • `!eu` • `!changelog` • `!guia` • `!diagnostico`", inline=False)
-    embed.add_field(name="Estado Atual", value="Etapa 3: política semanal com Conselho, Decreto e Intriga persistentes.", inline=False)
+    embed.add_field(name="Comandos", value="`!iniciar` • `!classe` • `!juramento` • `!trilha` • `!legado` • `!oraculo` • `!conselho` • `!decreto` • `!intriga` • `!anaisglobal` • `!alinhar` • `!reputacao` • `!mandato` • `!perfil` • `!resetar @membro` • `!eu` • `!changelog` • `!guia` • `!diagnostico`", inline=False)
+    embed.add_field(name="Estado Atual", value="Etapa 4: facções vivas com alinhamento, reputação e mandato social.", inline=False)
     embed.set_footer(text="EBR • Orientação oficial")
     await ctx.send(embed=embed)
 
