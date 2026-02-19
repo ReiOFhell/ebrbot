@@ -541,7 +541,25 @@ async def iniciar(ctx: commands.Context) -> None:
         user_id = str(ctx.author.id)
 
         if user_id == INKOSI_ID:
-            create_inkosi_record_if_needed(user_id)
+            try:
+                create_inkosi_record_if_needed(user_id)
+            except sqlite3.Error:
+                logger.exception("Falha SQLite no registro Inkosi; tentando auto-reparo")
+                init_db()
+                try:
+                    create_inkosi_record_if_needed(user_id)
+                except sqlite3.Error as exc2:
+                    logger.exception("Falha persistente no registro Inkosi")
+                    await send_grimoire_error(
+                        ctx,
+                        "iniciar.inkosi",
+                        command_name="iniciar",
+                        user_id=user_id,
+                        error=exc2,
+                    )
+                    await ctx.send(canon_line("recusa", "O trono oculto recusou o selo neste instante. Tenta novamente em alguns segundos."))
+                    return
+
             embed = discord.Embed(
                 title="REGISTRO IMPOSSÍVEL DETECTADO",
                 description=canon_line("abertura", "O Sistema tentou classificar a assinatura e aceitou apenas: **ABSOLUTO**."),
