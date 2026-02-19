@@ -244,56 +244,6 @@ def player_exists(user_id: str) -> bool:
     return get_player(user_id) is not None
 
 
-def update_player_currency(user_id: str, delta_ouro: int, delta_prestigio: int) -> None:
-    with get_conn() as conn:
-        conn.execute(
-            "UPDATE players SET ouro = ouro + ?, prestigio = prestigio + ? WHERE user_id = ?",
-            (delta_ouro, delta_prestigio, user_id),
-        )
-        conn.commit()
-
-
-def set_last_aventura(user_id: str, iso_datetime: str) -> None:
-    with get_conn() as conn:
-        conn.execute("UPDATE players SET last_aventura_at = ? WHERE user_id = ?", (iso_datetime, user_id))
-        conn.commit()
-
-
-def increment_stats(user_id: str, *, streak: int | None = None, total_inc: int = 0) -> None:
-    with get_conn() as conn:
-        if streak is None:
-            conn.execute(
-                "UPDATE players SET total_aventuras = total_aventuras + ? WHERE user_id = ?",
-                (total_inc, user_id),
-            )
-        else:
-            conn.execute(
-                "UPDATE players SET streak_aventura = ?, total_aventuras = total_aventuras + ? WHERE user_id = ?",
-                (streak, total_inc, user_id),
-            )
-        conn.commit()
-
-
-def get_cooldown_remaining(user_id: str) -> int:
-    player = get_player(user_id)
-    if not player or not player.get("last_aventura_at"):
-        return 0
-
-    last_time = datetime.fromisoformat(player["last_aventura_at"])
-    now = datetime.now(timezone.utc)
-    if last_time.tzinfo is None:
-        last_time = last_time.replace(tzinfo=timezone.utc)
-
-    diff = now - last_time
-    remaining = int(timedelta(minutes=COOLDOWN_MINUTES).total_seconds() - diff.total_seconds())
-    return max(0, remaining)
-
-
-def format_duration(seconds: int) -> str:
-    m, s = divmod(seconds, 60)
-    return f"{m}m {s}s"
-
-
 def create_inkosi_record_if_needed(user_id: str) -> dict[str, Any]:
     existing = get_player(user_id)
     if existing:
@@ -378,16 +328,74 @@ CLASSES: dict[str, dict[str, Any]] = {
     },
 }
 
-FASE2_ENVIRONMENTS = ["ruínas", "bosque selado", "estradas imperiais", "biblioteca vetusta", "fronteira sombria"]
-FASE2_TEXTS = {
-    "guerreiro": "Teu aço impôs respeito nas {ambiente}.",
-    "mago": "Teus selos brilharam nas {ambiente}.",
-    "cacador": "Teu faro conduziu o destino pelas {ambiente}.",
-    "soldado": "Teu passo disciplinado sustentou ordem nas {ambiente}.",
-    "explorador": "Teu mapa abriu passagem pelas {ambiente}.",
-    "inkosi": "As {ambiente} ajustaram-se em silêncio à tua presença.",
-}
 
+def build_iniciar_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="RITUAL DO DESPERTAR",
+        description=(
+            "**Ato I — O Mundo**\n"
+            "No EBR, impérios se erguem sobre juramentos antigos e sombras disciplinadas.\n"
+            "Cada nome inscrito altera o peso da noite.\n\n"
+            "**Ato II — A Testemunha**\n"
+            "O Grimório observa teu passo, mede teu silêncio e recolhe teu primeiro voto.\n"
+            "Nada do que fores será esquecido.\n\n"
+            "**Ato III — A Escolha**\n"
+            "Diante dos selos, escolhe teu Caminho.\n"
+            "A escolha é única. O destino não admite rascunhos."
+        ),
+        color=EMBED_COLOR,
+    )
+    for data in CLASSES.values():
+        embed.add_field(name=f"{data['icone']} {data['nome']}", value=data["frase"], inline=False)
+
+    embed.set_footer(text="FASE 1 — Núcleo do Jogador • O destino começa aqui")
+    return embed
+
+def normalize_class_input(raw: str) -> str:
+    aliases = {
+        "guerreiro": "guerreiro",
+        "mago": "mago",
+        "cacador": "cacador",
+        "caçador": "cacador",
+        "soldado": "soldado",
+        "explorador": "explorador",
+    }
+    return aliases.get(raw.strip().lower(), "")
+
+
+def register_class_for_user(user_id: str, classe_id: str) -> tuple[bool, str]:
+    if user_id == INKOSI_ID:
+        return False, "A assinatura ABSOLUTA não pode ser definida por escolha comum."
+
+    try:
+        if player_exists(user_id):
+            return False, "Teu destino já foi inscrito. O Grimório não aceita duplicatas."
+
+        data = CLASSES[classe_id]
+        attrs = data["atributos"]
+        create_player(
+            user_id=user_id,
+            classe_id=classe_id,
+            is_excecao=0,
+            nivel="1",
+            forca=attrs["FOR"],
+            resistencia=attrs["RES"],
+            agilidade=attrs["AGI"],
+            inteligencia=attrs["INT"],
+            mana=attrs["MAN"],
+            crescimento=data["crescimento"],
+            titulo=data["titulo"],
+            lore_texto=data["lore_texto"],
+            pressagio=data["pressagio"],
+        )
+        try:
+            add_annal_entry(user_id, f"Ritual do Despertar concluído. Caminho selado: {data['nome']}.")
+        except sqlite3.Error:
+            logger.exception("Falha ao registrar entrada nos Anais; cadastro principal mantido")
+        return True, data["nome"]
+    except sqlite3.Error:
+        logger.exception("Falha SQLite ao registrar classe")
+        return False, "Falha temporária de persistência do Grimório. Tente novamente em alguns segundos."
 
 # ============================================================
 # 6) UI
