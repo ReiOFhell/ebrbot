@@ -158,6 +158,16 @@ def init_db() -> None:
         ensure_columns(conn)
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS annals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                entrada TEXT NOT NULL,
+                criado_em TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS failure_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 command_name TEXT NOT NULL,
@@ -234,9 +244,19 @@ def create_player(
         conn.commit()
 
 
+def add_annal_entry(user_id: str, entrada: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO annals (user_id, entrada, criado_em) VALUES (?, ?, ?)",
+            (user_id, entrada, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+
+
 def delete_player(user_id: str) -> None:
     with get_conn() as conn:
         conn.execute("DELETE FROM players WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM annals WHERE user_id = ?", (user_id,))
         conn.commit()
 
 
@@ -446,10 +466,11 @@ class ClasseView(discord.ui.View):
             await interaction.followup.send(f"Rito selado: **{data['nome']}**.")
         except Exception:
             logger.exception("Falha em botão de classe")
+            mensagem = f"{VOICE['erro']} Selo de falha: BTN."
             if interaction.response.is_done():
-                await interaction.followup.send("O Grimório está em silêncio.", ephemeral=True)
+                await interaction.followup.send(mensagem, ephemeral=True)
             else:
-                await interaction.response.send_message("O Grimório está em silêncio.", ephemeral=True)
+                await interaction.response.send_message(mensagem, ephemeral=True)
 
     @discord.ui.button(label="Guerreiro", style=discord.ButtonStyle.danger)
     async def b1(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
