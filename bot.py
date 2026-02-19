@@ -120,9 +120,27 @@ async def send_grimoire_error(
 
 
 def ensure_columns(conn: sqlite3.Connection) -> None:
-    # Etapa 0: manter compatibilidade ampla sem depender de colunas de fases futuras.
-    # A função permanece para migrações incrementais futuras sem alterar experiência atual.
-    _ = conn
+    # Etapa 0: garante apenas colunas canônicas da Fase 1 (sem gameplay extra).
+    required = {
+        "user_id": "TEXT",
+        "classe": "TEXT",
+        "is_excecao": "INTEGER DEFAULT 0",
+        "nivel": "TEXT",
+        "criado_em": "TEXT",
+        "forca": "TEXT",
+        "resistencia": "TEXT",
+        "agilidade": "TEXT",
+        "inteligencia": "TEXT",
+        "mana": "TEXT",
+        "crescimento": "TEXT",
+        "titulo": "TEXT",
+        "lore_texto": "TEXT",
+        "pressagio": "TEXT",
+    }
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(players)").fetchall()}
+    for name, ddl in required.items():
+        if name not in cols:
+            conn.execute(f"ALTER TABLE players ADD COLUMN {name} {ddl}")
 
 
 def init_db() -> None:
@@ -480,9 +498,15 @@ class ClasseView(discord.ui.View):
 
             await interaction.response.edit_message(view=self)
             await interaction.followup.send(f"Rito selado: **{data['nome']}**.")
-        except Exception:
+        except Exception as exc:
             logger.exception("Falha em botão de classe")
-            mensagem = f"{VOICE['erro']} Selo de falha: BTN."
+            uid = str(interaction.user.id if interaction.user else "0")
+            seal = "SEM_SELO"
+            try:
+                seal = log_failure("BTN", uid, str(exc))
+            except Exception:
+                logger.exception("Falha ao registrar selo BTN")
+            mensagem = f"{VOICE['erro']} Selo de falha: BTN-{seal}."
             if interaction.response.is_done():
                 await interaction.followup.send(mensagem, ephemeral=True)
             else:
