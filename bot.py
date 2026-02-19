@@ -47,6 +47,7 @@ DATA_DIR_CANDIDATES = [
 ]
 DATA_DIR: Path | None = None
 DB_PATH: Path | None = None
+FAILED_DB_DIRS: set[str] = set()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 DISCORD_TOKEN_FALLBACK = "COLE_SEU_TOKEN_AQUI"
@@ -115,6 +116,8 @@ def resolve_db_path() -> Path:
     for candidate in DATA_DIR_CANDIDATES:
         if candidate is None:
             continue
+        if str(candidate) in FAILED_DB_DIRS:
+            continue
         try:
             candidate.mkdir(parents=True, exist_ok=True)
             test_file = candidate / ".write_test"
@@ -125,6 +128,7 @@ def resolve_db_path() -> Path:
             logger.info("SQLite path resolvido para: %s", DB_PATH)
             return DB_PATH
         except Exception:
+            FAILED_DB_DIRS.add(str(candidate))
             logger.warning("Diretório não gravável para SQLite: %s", candidate)
 
     raise RuntimeError("Nenhum diretório gravável disponível para players.db")
@@ -134,6 +138,14 @@ def get_conn() -> sqlite3.Connection:
     db_file = resolve_db_path()
     return sqlite3.connect(db_file)
 
+
+def mark_current_db_path_failed() -> None:
+    global DATA_DIR, DB_PATH
+    if DATA_DIR is not None:
+        FAILED_DB_DIRS.add(str(DATA_DIR))
+        logger.warning("Marcando caminho SQLite como falho: %s", DATA_DIR)
+    DATA_DIR = None
+    DB_PATH = None
 
 
 
@@ -174,7 +186,23 @@ def with_db_retry(fn):
                 logger.warning("Schema desatualizado detectado; reexecutando init_db e retry: %s", exc)
                 init_db()
                 return fn(*args, **kwargs)
+
+            if (
+                "readonly" in message
+                or "unable to open database file" in message
+                or "disk i/o" in message
+                or "database is locked" in message
+            ):
+                logger.warning("Falha operacional SQLite; tentando failover de diretório: %s", exc)
+                mark_current_db_path_failed()
+                init_db()
+                return fn(*args, **kwargs)
             raise
+        except sqlite3.DatabaseError as exc:
+            logger.warning("DatabaseError SQLite; tentando failover de diretório: %s", exc)
+            mark_current_db_path_failed()
+            init_db()
+            return fn(*args, **kwargs)
 
     return wrapper
 
@@ -637,7 +665,7 @@ async def iniciar(ctx: commands.Context) -> None:
             except sqlite3.Error:
                 logger.exception("Falha SQLite ao criar registro Inkosi")
                 await send_grimoire_error(ctx, "iniciar.db")
-                await ctx.send("Persistência indisponível no momento. O arquivo será refeito automaticamente ao reiniciar.")
+                await ctx.send("Persistência foi redirecionada automaticamente. Tente `!iniciar` novamente em instantes.")
                 return
 
             embed = discord.Embed(
