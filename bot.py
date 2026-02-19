@@ -84,6 +84,28 @@ def short_hash(command_name: str, timestamp_utc: str, user_id: str) -> str:
     return hashlib.sha1(raw).hexdigest()[:8].upper()
 
 
+def options_bulleted_text(options: dict[str, Any], label_key: str | None = None) -> str:
+    if label_key:
+        return "\n".join(f"• `{key}` — {str(meta.get(label_key, key))}" for key, meta in options.items())
+    return "\n".join(f"• `{key}` — {value}" for key, value in options.items())
+
+
+def parse_typed_line(raw: str | None, allowed_types: set[str]) -> tuple[str, str] | None:
+    if not raw:
+        return None
+
+    parts = raw.strip().split(maxsplit=1)
+    if not parts:
+        return None
+
+    event_type = parts[0].lower()
+    detail = parts[1].strip() if len(parts) > 1 else ""
+    if event_type not in allowed_types or not detail:
+        return None
+
+    return event_type, detail
+
+
 def log_failure(command_name: str, user_id: str, error_text: str) -> str:
     ts = datetime.now(timezone.utc).isoformat()
     seal = short_hash(command_name, ts, user_id)
@@ -1159,7 +1181,7 @@ async def juramento(ctx: commands.Context, *, escolha: str | None = None) -> Non
             return
 
         if not escolha:
-            opcoes = "\n".join(f"• `{k}` — {v}" for k, v in JURAMENTOS.items())
+            opcoes = options_bulleted_text(JURAMENTOS)
             await ctx.send(canon_line("abertura", f"Selos canônicos disponíveis:\n{opcoes}\n\nUso: `!juramento <opção>`."))
             return
 
@@ -1337,13 +1359,12 @@ async def intriga(ctx: commands.Context, *, linha: str | None = None) -> None:
             await ctx.send(canon_line("recusa", "Uso: `!intriga <rumor|denuncia|alianca|ameaca> <texto>`."))
             return
 
-        partes = linha.strip().split(maxsplit=1)
-        tipo = partes[0].lower()
-        texto = partes[1].strip() if len(partes) > 1 else ""
-
-        if tipo not in INTRIGA_TYPES or not texto:
+        parsed = parse_typed_line(linha, INTRIGA_TYPES)
+        if not parsed:
             await ctx.send(canon_line("recusa", "Formato inválido. Exemplo: `!intriga rumor Tropas vistas no norte`."))
             return
+
+        tipo, texto = parsed
 
         titulo = f"Intriga — {tipo.title()}"
         add_global_event("intriga", titulo, texto, actor_user_id=str(ctx.author.id))
@@ -1386,7 +1407,7 @@ async def alinhar(ctx: commands.Context, *, faccao: str | None = None) -> None:
             return
 
         if not faccao:
-            opcoes = "\n".join(f"• `{k}` — {v}" for k, v in FACTIONS.items())
+            opcoes = options_bulleted_text(FACTIONS)
             await ctx.send(canon_line("abertura", f"Facções disponíveis:\n{opcoes}\n\nUso: `!alinhar <faccao>`."))
             return
 
@@ -1445,13 +1466,12 @@ async def mandato(ctx: commands.Context, *, linha: str | None = None) -> None:
             await ctx.send(canon_line("recusa", f"Uso: `!mandato <{tipos}> <descrição social>`."))
             return
 
-        partes = linha.strip().split(maxsplit=1)
-        tipo = partes[0].lower()
-        descricao = partes[1].strip() if len(partes) > 1 else ""
-        if tipo not in MANDATO_TYPES or not descricao:
+        parsed = parse_typed_line(linha, MANDATO_TYPES)
+        if not parsed:
             await ctx.send(canon_line("recusa", "Formato inválido. Exemplo: `!mandato mediacao Trégua firmada na fronteira leste`."))
             return
 
+        tipo, descricao = parsed
         faccao = str(player.get("faccao_alinhada") or "").strip().lower()
         alvo = faccao if faccao in FACTIONS else "equilibrio"
         novo_total = add_faction_reputation(user_id, alvo, 8)
@@ -1604,7 +1624,7 @@ async def diagnostico(ctx: commands.Context) -> None:
                 )
             embed.add_field(name="Últimos selos", value="\n".join(lines[:5]), inline=False)
 
-        embed.set_footer(text="Etapa 2 • Estado do Mundo")
+        embed.set_footer(text="Etapa 4 • Facções vivas")
         await ctx.send(embed=embed)
     except Exception as exc:
         logger.exception("Falha no comando !diagnostico")
