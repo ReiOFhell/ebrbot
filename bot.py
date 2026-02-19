@@ -197,6 +197,18 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS world_state (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                epoca_atual TEXT NOT NULL,
+                decreto_ativo TEXT NOT NULL,
+                tensao_fronteiras TEXT NOT NULL,
+                faccao_ascensao TEXT NOT NULL,
+                atualizado_em TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS failure_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 command_name TEXT NOT NULL,
@@ -356,6 +368,54 @@ def get_recent_failures(limit: int = 5) -> list[dict[str, Any]]:
         return [dict(r) for r in rows]
 
 
+def ensure_world_state_row(conn: sqlite3.Connection) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO world_state (
+            singleton_id,
+            epoca_atual,
+            decreto_ativo,
+            tensao_fronteiras,
+            faccao_ascensao,
+            atualizado_em
+        ) VALUES (1, ?, ?, ?, ?, ?)
+        """,
+        (
+            WORLD_STATE_DEFAULTS["epoca_atual"],
+            WORLD_STATE_DEFAULTS["decreto_ativo"],
+            WORLD_STATE_DEFAULTS["tensao_fronteiras"],
+            WORLD_STATE_DEFAULTS["faccao_ascensao"],
+            now,
+        ),
+    )
+
+
+def get_world_state() -> dict[str, Any]:
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_world_state_row(conn)
+        row = conn.execute("SELECT * FROM world_state WHERE singleton_id = 1").fetchone()
+        conn.commit()
+        if row:
+            return dict(row)
+    return {"singleton_id": 1, **WORLD_STATE_DEFAULTS, "atualizado_em": datetime.now(timezone.utc).isoformat()}
+
+
+def build_oraculo_message(world_state: dict[str, Any]) -> str:
+    tensao = str(world_state.get("tensao_fronteiras") or "MÉDIA").strip().upper()
+    if tensao not in TENSION_ORACLE_LINES:
+        tensao = "MÉDIA"
+
+    return (
+        f"**Época:** {world_state.get('epoca_atual', WORLD_STATE_DEFAULTS['epoca_atual'])}\n"
+        f"**Decreto ativo:** {world_state.get('decreto_ativo', WORLD_STATE_DEFAULTS['decreto_ativo'])}\n"
+        f"**Fronteiras:** {tensao}\n"
+        f"**Facção em ascensão:** {world_state.get('faccao_ascensao', WORLD_STATE_DEFAULTS['faccao_ascensao'])}\n\n"
+        f"{TENSION_ORACLE_LINES[tensao]}"
+    )
+
+
 def get_db_diagnostics() -> dict[str, Any]:
     db_exists = DB_PATH.exists()
     data_dir_exists = DATA_DIR.exists()
@@ -368,6 +428,8 @@ def get_db_diagnostics() -> dict[str, Any]:
         "data_dir_writable": writable,
         "players_count": 0,
         "failure_count": 0,
+        "world_tensao": "-",
+        "world_atualizado_em": "-",
     }
 
     if not db_exists:
@@ -376,6 +438,13 @@ def get_db_diagnostics() -> dict[str, Any]:
     with get_conn() as conn:
         details["players_count"] = conn.execute("SELECT COUNT(*) FROM players").fetchone()[0]
         details["failure_count"] = conn.execute("SELECT COUNT(*) FROM failure_logs").fetchone()[0]
+        ensure_world_state_row(conn)
+        world = conn.execute("SELECT tensao_fronteiras, atualizado_em FROM world_state WHERE singleton_id = 1").fetchone()
+        conn.commit()
+
+    if world:
+        details["world_tensao"] = world[0]
+        details["world_atualizado_em"] = world[1]
 
     return details
 
@@ -478,6 +547,19 @@ TRILHAS: list[tuple[str, int]] = [
     ("Venerável", 12),
     ("Lenda", 18),
 ]
+
+WORLD_STATE_DEFAULTS: dict[str, str] = {
+    "epoca_atual": "Época das Brasas Veladas",
+    "decreto_ativo": "Decreto do Véu Silencioso",
+    "tensao_fronteiras": "MÉDIA",
+    "faccao_ascensao": "Casa das Lanternas (observada)",
+}
+
+TENSION_ORACLE_LINES: dict[str, str] = {
+    "BAIXA": "As muralhas respiram em paz vigiada; o Império acumula fôlego para o próximo ciclo.",
+    "MÉDIA": "As fronteiras vibram em alerta disciplinado; cada passo errado pode acender um novo decreto.",
+    "ALTA": "As fronteiras ardem sob aço e presságios; o Império exige vigilância absoluta dos despertos.",
+}
 
 
 def build_iniciar_embed() -> discord.Embed:
@@ -909,6 +991,22 @@ async def legado(ctx: commands.Context) -> None:
         await send_grimoire_error(ctx, "legado", command_name="legado", user_id=str(ctx.author.id), error=exc)
 
 
+@bot.command(name="oraculo")
+async def oraculo(ctx: commands.Context) -> None:
+    try:
+        world_state = get_world_state()
+        embed = discord.Embed(
+            title="ORÁCULO IMPERIAL",
+            description=build_oraculo_message(world_state),
+            color=EMBED_COLOR,
+        )
+        embed.set_footer(text="Etapa 2 — Estado do Mundo")
+        await ctx.send(embed=embed)
+    except Exception as exc:
+        logger.exception("Falha no comando !oraculo")
+        await send_grimoire_error(ctx, "oraculo", command_name="oraculo", user_id=str(ctx.author.id), error=exc)
+
+
 @bot.command(name="perfil")
 async def perfil(ctx: commands.Context) -> None:
     try:
@@ -992,10 +1090,10 @@ async def eu(ctx: commands.Context) -> None:
 @bot.command(name="changelog")
 async def changelog(ctx: commands.Context) -> None:
     embed = discord.Embed(title="Changelog — Núcleo do Jogador", color=EMBED_COLOR)
-    embed.description = """**Etapa 1 — Progressão narrativa canônica**
-• `!juramento` com escolha única e troca por cooldown longo
-• `!trilha` com posição narrativa e próximo degrau
-• `!legado` com marcos históricos persistidos"""
+    embed.description = """**Etapa 2 — Estado do Mundo**
+• `world_state` persistente (época, decreto, tensão e facção em ascensão)
+• `!oraculo` responde com base no estado do mundo (não RNG puro)
+• respostas canônicas e coerentes entre invocações"""
     embed.set_footer(text="EBR • Base estável")
     await ctx.send(embed=embed)
 
@@ -1032,6 +1130,14 @@ async def diagnostico(ctx: commands.Context) -> None:
             ),
             inline=False,
         )
+        embed.add_field(
+            name="Estado do Mundo",
+            value=(
+                f"**Tensão nas fronteiras:** {info['world_tensao']}\n"
+                f"**Última atualização:** {str(info['world_atualizado_em'])[:19]}"
+            ),
+            inline=False,
+        )
 
         if failures:
             lines = []
@@ -1041,7 +1147,7 @@ async def diagnostico(ctx: commands.Context) -> None:
                 )
             embed.add_field(name="Últimos selos", value="\n".join(lines[:5]), inline=False)
 
-        embed.set_footer(text="Etapa 0 • Observabilidade canônica")
+        embed.set_footer(text="Etapa 2 • Estado do Mundo")
         await ctx.send(embed=embed)
     except Exception as exc:
         logger.exception("Falha no comando !diagnostico")
@@ -1062,8 +1168,8 @@ async def guia(ctx: commands.Context) -> None:
         description="Fase estável ativa: identidade canônica e registros persistentes.",
         color=EMBED_COLOR,
     )
-    embed.add_field(name="Comandos", value="`!iniciar` • `!classe` • `!juramento` • `!trilha` • `!legado` • `!perfil` • `!resetar @membro` • `!eu` • `!changelog` • `!guia` • `!diagnostico`", inline=False)
-    embed.add_field(name="Estado Atual", value="Etapa 1: progressão narrativa (juramento, trilha e legado), sem power creep.", inline=False)
+    embed.add_field(name="Comandos", value="`!iniciar` • `!classe` • `!juramento` • `!trilha` • `!legado` • `!oraculo` • `!perfil` • `!resetar @membro` • `!eu` • `!changelog` • `!guia` • `!diagnostico`", inline=False)
+    embed.add_field(name="Estado Atual", value="Etapa 2: estado do mundo persistente com oráculo canônico.", inline=False)
     embed.set_footer(text="EBR • Orientação oficial")
     await ctx.send(embed=embed)
 
