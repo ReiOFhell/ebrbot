@@ -1,11 +1,11 @@
 # ============================================================
 # 1) IMPORTS
 # ============================================================
+import hashlib
 import logging
 import os
-import random
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +43,13 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 DISCORD_TOKEN_FALLBACK = "COLE_SEU_TOKEN_AQUI"
 
 EMBED_COLOR = discord.Color.from_rgb(45, 18, 54)
-COOLDOWN_MINUTES = 20
+
+VOICE = {
+    "abertura": "✦ O Grimório abre suas páginas sob teu nome.",
+    "sucesso": "✦ O selo foi aceito pelos arquivos imperiais.",
+    "recusa": "✦ O rito foi recusado; o destino exige outro passo.",
+    "erro": "O Grimório está em silêncio.",
+}
 
 
 # ============================================================
@@ -66,6 +72,51 @@ def resolve_token() -> str:
 def get_conn() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     return sqlite3.connect(DB_PATH)
+
+
+def canon_line(kind: str, extra: str | None = None) -> str:
+    base = VOICE.get(kind, VOICE["erro"])
+    return f"{base}\n{extra}" if extra else base
+
+
+def short_hash(command_name: str, timestamp_utc: str, user_id: str) -> str:
+    raw = f"{command_name}|{timestamp_utc}|{user_id}".encode("utf-8")
+    return hashlib.sha1(raw).hexdigest()[:8].upper()
+
+
+def log_failure(command_name: str, user_id: str, error_text: str) -> str:
+    ts = datetime.now(timezone.utc).isoformat()
+    seal = short_hash(command_name, ts, user_id)
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO failure_logs (command_name, timestamp_utc, user_id, hash_curto, error_text)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (command_name, ts, user_id, seal, error_text),
+        )
+        conn.commit()
+    return seal
+
+
+async def send_grimoire_error(
+    ctx: commands.Context,
+    tag: str,
+    *,
+    command_name: str | None = None,
+    user_id: str | None = None,
+    error: Exception | None = None,
+) -> None:
+    command_ref = command_name or tag
+    uid = user_id or str(ctx.author.id if ctx.author else "0")
+    err_text = str(error) if error else "erro não informado"
+    seal = "SEM_SELO"
+    try:
+        seal = log_failure(command_ref, uid, err_text)
+    except Exception:
+        logger.exception("Falha ao registrar failure_logs")
+
+    await ctx.send(f"{VOICE['erro']} Selo de falha: {tag}-{seal}.")
 
 
 def ensure_columns(conn: sqlite3.Connection) -> None:
@@ -105,6 +156,18 @@ def init_db() -> None:
             """
         )
         ensure_columns(conn)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS failure_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                command_name TEXT NOT NULL,
+                timestamp_utc TEXT NOT NULL,
+                user_id TEXT,
+                hash_curto TEXT NOT NULL,
+                error_text TEXT
+            )
+            """
+        )
         conn.commit()
 
 
@@ -413,11 +476,12 @@ class ClasseView(discord.ui.View):
 async def iniciar(ctx: commands.Context) -> None:
     try:
         user_id = str(ctx.author.id)
+
         if user_id == INKOSI_ID:
             create_inkosi_record_if_needed(user_id)
             embed = discord.Embed(
                 title="REGISTRO IMPOSSÍVEL DETECTADO",
-                description="O Sistema tentou classificar a assinatura presente e falhou por inadequação.",
+                description=canon_line("abertura", "O Sistema tentou classificar a assinatura e aceitou apenas: **ABSOLUTO**."),
                 color=discord.Color.dark_red(),
             )
             embed.add_field(name="Designação", value="Aquele que Não se Submete", inline=False)
@@ -427,25 +491,46 @@ async def iniciar(ctx: commands.Context) -> None:
             return
 
         if player_exists(user_id):
-            await ctx.send("Teu nome já repousa no Grimório. Usa `!perfil`.")
+            await ctx.send(canon_line("recusa", "Teu nome já repousa no Grimório. Usa `!perfil`."))
             return
 
+        embed = build_iniciar_embed()
+        await ctx.send(embed=embed, view=ClasseView(author_id=ctx.author.id))
+    except Exception as exc:
+        logger.exception("Falha no comando !iniciar")
+        await send_grimoire_error(ctx, "iniciar", command_name="iniciar", user_id=str(ctx.author.id), error=exc)
+
+
+@bot.command(name="classe")
+async def classe(ctx: commands.Context, *, classe_id: str | None = None) -> None:
+    try:
+        if not classe_id:
+            await ctx.send(canon_line("recusa", "Uso: `!classe <guerreiro|mago|cacador|soldado|explorador>`."))
+            return
+
+        user_id = str(ctx.author.id)
+        cid = normalize_class_input(classe_id)
+        if not cid or cid not in CLASSES:
+            await ctx.send(canon_line("recusa", "Classe inválida."))
+            return
+
+        ok, result = register_class_for_user(user_id, cid)
+        if not ok:
+            await ctx.send(canon_line("recusa", result))
+            return
+
+        data = CLASSES[cid]
         embed = discord.Embed(
-            title="RITUAL DO DESPERTAR",
-            description=(
-                "**Ato I — O Mundo**\nNo EBR, juramentos moldam a noite.\n\n"
-                "**Ato II — A Testemunha**\nO Grimório recolhe teu primeiro voto.\n\n"
-                "**Ato III — A Escolha**\nA escolha é única."
-            ),
+            title="RITUAL CONCLUÍDO",
+            description=canon_line("sucesso", f"**{ctx.author.display_name}** foi inscrito como **{result}**."),
             color=EMBED_COLOR,
         )
-        for d in CLASSES.values():
-            embed.add_field(name=f"{d['icone']} {d['nome']}", value=d["frase"], inline=False)
-        embed.set_footer(text="FASE 1 — Núcleo do Jogador • O destino começa aqui")
-        await ctx.send(embed=embed, view=ClasseView(ctx.author.id))
-    except Exception:
-        logger.exception("Falha em !iniciar")
-        await ctx.send("O Grimório está em silêncio.")
+        embed.add_field(name="Título", value=data["titulo"], inline=False)
+        embed.set_footer(text="FASE 1 — Núcleo do Jogador • Juramento selado")
+        await ctx.send(embed=embed)
+    except Exception as exc:
+        logger.exception("Falha no comando !classe")
+        await send_grimoire_error(ctx, "classe", command_name="classe", user_id=str(ctx.author.id), error=exc)
 
 
 @bot.command(name="perfil")
@@ -453,79 +538,68 @@ async def perfil(ctx: commands.Context) -> None:
     try:
         user_id = str(ctx.author.id)
         player = create_inkosi_record_if_needed(user_id) if user_id == INKOSI_ID else get_player(user_id)
+
         if not player:
-            await ctx.send("Nenhum registro encontrado. Use `!iniciar`.")
+            await ctx.send(canon_line("recusa", "Nenhum registro foi encontrado. Invoque `!iniciar`."))
             return
 
         if int(player.get("is_excecao", 0)) == 1:
-            embed = discord.Embed(title="REGISTRO ABSOLUTO", color=discord.Color.dark_red())
+            embed = discord.Embed(
+                title="REGISTRO ABSOLUTO",
+                description="Os arquivos tentaram ordenar esta presença e foram reduzidos ao silêncio.",
+                color=discord.Color.dark_red(),
+            )
             embed.add_field(name="Designação", value="Aquele que Não se Submete", inline=False)
             embed.add_field(name="Classificação", value="Não Indexável", inline=False)
-            embed.add_field(name="Essência", value="FOR MAX | RES MAX | AGI MAX | INT MAX | MAN MAX", inline=False)
-            embed.add_field(
-                name="Tesouro Imperial",
-                value=f"**Ouro:** {player.get('ouro', 0)}\n**Prestígio:** {player.get('prestigio', 0)}\n**Aventuras:** {player.get('total_aventuras', 0)}",
-                inline=False,
-            )
-            embed.set_footer(text="FASE 2 — Loop Principal • Registro canônico")
+            embed.add_field(name="Essência", value="**FOR:** MAX | **RES:** MAX | **AGI:** MAX | **INT:** MAX | **MAN:** MAX", inline=False)
+            embed.set_footer(text="FASE 1 — Núcleo do Jogador • Registro canônico")
             await ctx.send(embed=embed)
             return
 
-        classe_nome = CLASSES.get(player["classe"], {}).get("nome", player["classe"])
-        embed = discord.Embed(title="GRIMÓRIO DO DESTINO", color=EMBED_COLOR)
-        embed.add_field(
-            name="Identidade",
-            value=f"**Nome:** {ctx.author.display_name}\n**Classe:** {classe_nome}\n**Título:** {player['titulo']}",
-            inline=False,
-        )
-        embed.add_field(
-            name="Essência",
-            value=f"FOR {player['forca']} | RES {player['resistencia']} | AGI {player['agilidade']} | INT {player['inteligencia']} | MAN {player['mana']}",
-            inline=False,
-        )
+        classe_id = player["classe"]
+        classe_nome = CLASSES.get(classe_id, {}).get("nome", classe_id.title())
+        embed = discord.Embed(title="GRIMÓRIO DO DESTINO", description=canon_line("abertura"), color=EMBED_COLOR)
+        embed.add_field(name="Identidade", value=f"**Nome:** {ctx.author.display_name}\n**Classe:** {classe_nome}\n**Título:** {player['titulo']}", inline=False)
+        embed.add_field(name="Essência", value=f"**FOR:** {player['forca']} | **RES:** {player['resistencia']} | **AGI:** {player['agilidade']} | **INT:** {player['inteligencia']} | **MAN:** {player['mana']}", inline=False)
         embed.add_field(name="Caminho Escolhido", value=player["lore_texto"], inline=False)
         embed.add_field(name="Tendência de Crescimento", value=player["crescimento"], inline=False)
         embed.add_field(name="Presságio", value=player["pressagio"], inline=False)
-        # ================= FASE 2 =================
-        embed.add_field(
-            name="Tesouro Imperial",
-            value=f"**Ouro:** {player.get('ouro', 0)}\n**Prestígio:** {player.get('prestigio', 0)}\n**Aventuras:** {player.get('total_aventuras', 0)}",
-            inline=False,
-        )
-        embed.set_footer(text="FASE 2 — Loop Principal • Registro canônico")
+        embed.set_footer(text="FASE 1 — Núcleo do Jogador • Registro canônico")
         await ctx.send(embed=embed)
-    except Exception:
-        logger.exception("Falha em !perfil")
-        await ctx.send("O Grimório está em silêncio.")
+    except Exception as exc:
+        logger.exception("Falha no comando !perfil")
+        await send_grimoire_error(ctx, "perfil", command_name="perfil", user_id=str(ctx.author.id), error=exc)
 
 
 @bot.command(name="resetar")
 @commands.has_permissions(administrator=True)
 async def resetar(ctx: commands.Context, membro: discord.Member) -> None:
     try:
-        uid = str(membro.id)
-        if not player_exists(uid):
-            await ctx.send("Nenhum selo ativo encontrado.")
+        alvo_id = str(membro.id)
+        if not player_exists(alvo_id):
+            await ctx.send(canon_line("recusa", f"Nenhum selo ativo foi encontrado para **{membro.display_name}**."))
             return
-        delete_player(uid)
-        if uid == INKOSI_ID:
-            await ctx.send("⚠️ Revogação do Registro Absoluto executada por decreto administrativo.")
-        else:
-            await ctx.send(f"Revogação do Registro executada para **{membro.display_name}**.")
-    except Exception:
-        logger.exception("Falha em !resetar")
-        await ctx.send("O Grimório está em silêncio.")
+
+        delete_player(alvo_id)
+        if alvo_id == INKOSI_ID:
+            await ctx.send("⚠️ **REVOGAÇÃO IMPOSSÍVEL, MAS EXECUTADA**\nAté mesmo o Registro Absoluto foi removido por decreto administrativo.")
+            return
+
+        await ctx.send(canon_line("sucesso", f"Revogação do Registro executada para **{membro.display_name}**."))
+    except Exception as exc:
+        logger.exception("Falha no comando !resetar")
+        await send_grimoire_error(ctx, "resetar", command_name="resetar", user_id=str(ctx.author.id), error=exc)
 
 
 @resetar.error
 async def resetar_error(ctx: commands.Context, error: commands.CommandError) -> None:
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send("Somente administradores podem decretar a Revogação do Registro.")
+        await ctx.send(canon_line("recusa", "Somente administradores podem decretar a Revogação do Registro."))
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send("Uso correto: `!resetar @membro`")
+        await ctx.send(canon_line("recusa", "Uso correto: `!resetar @membro`"))
     else:
-        logger.exception("Erro !resetar", exc_info=error)
-        await ctx.send("O Grimório está em silêncio.")
+        logger.exception("Erro não tratado em !resetar", exc_info=error)
+        await send_grimoire_error(ctx, "resetar.error", command_name="resetar.error", user_id=str(ctx.author.id), error=error)
 
 
 @bot.command(name="eu")
@@ -533,101 +607,16 @@ async def eu(ctx: commands.Context) -> None:
     await ctx.send("Sou o Grimório de EBR: registro destinos, não promessas.")
 
 
-# ================= FASE 2 =================
-@bot.command(name="aventurar")
-async def aventurar(ctx: commands.Context) -> None:
-    try:
-        user_id = str(ctx.author.id)
-        player = create_inkosi_record_if_needed(user_id) if user_id == INKOSI_ID else get_player(user_id)
-        if not player:
-            await ctx.send("Teu nome ainda não foi selado. Invoque `!iniciar`.")
-            return
-
-        rem = get_cooldown_remaining(user_id)
-        if rem > 0:
-            embed = discord.Embed(
-                title="RITO EM ESPERA",
-                description=(
-                    f"Teu próximo passo ritualístico abre em **{format_duration(rem)}**.\n"
-                    "O mundo não apressa destino."
-                ),
-                color=EMBED_COLOR,
-            )
-            await ctx.send(embed=embed)
-            return
-
-        roll = random.random()
-        if roll < 0.70:
-            resultado = "sucesso comum"
-            ouro, prestigio = 10, 1
-            streak = int(player.get("streak_aventura", 0)) + 1
-        elif roll < 0.90:
-            resultado = "sucesso grande"
-            ouro, prestigio = 25, 3
-            streak = int(player.get("streak_aventura", 0)) + 1
-        else:
-            resultado = "falha"
-            ouro, prestigio = 2, 0
-            streak = 0
-
-        ambiente = random.choice(FASE2_ENVIRONMENTS)
-        classe_id = player.get("classe", "inkosi")
-        flavor = FASE2_TEXTS.get(classe_id, FASE2_TEXTS["guerreiro"]).format(ambiente=ambiente)
-        if user_id == INKOSI_ID:
-            flavor = FASE2_TEXTS["inkosi"].format(ambiente=ambiente)
-
-        now_iso = datetime.now(timezone.utc).isoformat()
-        update_player_currency(user_id, ouro, prestigio)
-        set_last_aventura(user_id, now_iso)
-        increment_stats(user_id, streak=streak, total_inc=1)
-
-        embed = discord.Embed(
-            title="AVENTURA CONCLUÍDA",
-            description=(
-                f"**Resultado:** {resultado}\n"
-                f"{flavor}\n"
-                f"Recompensa: **+{ouro} ouro** | **+{prestigio} prestígio**"
-            ),
-            color=EMBED_COLOR,
-        )
-        embed.set_footer(text="FASE 2 — Loop Principal • O destino responde")
-        await ctx.send(embed=embed)
-    except Exception:
-        logger.exception("Falha em !aventurar")
-        await ctx.send("O Grimório está em silêncio.")
-
-
-# ================= FASE 2 =================
-@bot.command(name="status")
-async def status(ctx: commands.Context) -> None:
-    try:
-        user_id = str(ctx.author.id)
-        player = create_inkosi_record_if_needed(user_id) if user_id == INKOSI_ID else get_player(user_id)
-        if not player:
-            await ctx.send("Teu nome ainda não foi selado. Invoque `!iniciar`.")
-            return
-
-        embed = discord.Embed(title="STATUS IMPERIAL", color=EMBED_COLOR)
-        embed.add_field(name="Ouro", value=str(player.get("ouro", 0)), inline=True)
-        embed.add_field(name="Prestígio", value=str(player.get("prestigio", 0)), inline=True)
-        embed.add_field(name="Total de Aventuras", value=str(player.get("total_aventuras", 0)), inline=False)
-        embed.set_footer(text="FASE 2 — Loop Principal")
-        await ctx.send(embed=embed)
-    except Exception:
-        logger.exception("Falha em !status")
-        await ctx.send("O Grimório está em silêncio.")
-
-
 @bot.command(name="changelog")
 async def changelog(ctx: commands.Context) -> None:
-    embed = discord.Embed(title="Changelog", color=EMBED_COLOR)
+    embed = discord.Embed(title="Changelog — Núcleo do Jogador", color=EMBED_COLOR)
     embed.description = (
-        "**FASE 1 — Núcleo do Jogador**\n"
-        "Criação única, perfil canônico, reset admin e exceção Inkosi.\n\n"
-        "**FASE 2 — Loop Principal**\n"
-        "`!aventurar` com cooldown, RNG leve, ouro e prestígio persistentes.\n"
-        "`!status` e expansão do `!perfil` com progresso econômico-social."
+        "**Etapa 0 — Fundação técnica e padrão canônico**\n"
+        "• Observabilidade com Selo de Falha persistente\n"
+        "• Migração segura do SQLite sem alterar experiência\n"
+        "• Voz ritualística padronizada (abertura/sucesso/recusa)"
     )
+    embed.set_footer(text="EBR • Base estável")
     await ctx.send(embed=embed)
 
 
@@ -635,28 +624,33 @@ async def changelog(ctx: commands.Context) -> None:
 async def guia(ctx: commands.Context) -> None:
     embed = discord.Embed(
         title="Guia do Grimório — EBR",
-        description="FASE 2 ativa: Loop Principal de aventura persistente.",
+        description="Fase estável ativa: identidade canônica e registros persistentes.",
         color=EMBED_COLOR,
     )
-    embed.add_field(
-        name="Comandos",
-        value=(
-            "`!iniciar`, `!perfil`, `!resetar @membro`, `!eu`, `!changelog`, `!guia`\n"
-            "`!aventurar`, `!status`"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="O que ainda NÃO existe",
-        value="Sem combate completo, inventário, mercado, guildas, PvP, ranking, temporadas, crafting.",
-        inline=False,
-    )
+    embed.add_field(name="Comandos", value="`!iniciar` • `!classe` • `!perfil` • `!resetar @membro` • `!eu` • `!changelog` • `!guia`", inline=False)
+    embed.add_field(name="Estado Atual", value="Etapa 0: fundação técnica e padrão canônico. Sem novos loops de gameplay/social.", inline=False)
+    embed.set_footer(text="EBR • Orientação oficial")
     await ctx.send(embed=embed)
-
 
 # ============================================================
 # 8) EVENTOS
 # ============================================================
+
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if isinstance(error, commands.CommandNotFound):
+        return
+
+    logger.exception("Erro global de comando: %s", error)
+    await send_grimoire_error(
+        ctx,
+        "global",
+        command_name=(ctx.command.qualified_name if ctx.command else "global"),
+        user_id=str(ctx.author.id if ctx.author else "0"),
+        error=error,
+    )
+
 @bot.event
 async def on_ready() -> None:
     logger.info("Bot conectado como %s (%s)", bot.user, bot.user.id if bot.user else "?")
