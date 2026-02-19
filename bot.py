@@ -5,7 +5,7 @@ import hashlib
 import logging
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -142,6 +142,8 @@ def ensure_columns(conn: sqlite3.Connection) -> None:
         "last_aventura_at": "TEXT",
         "streak_aventura": "INTEGER NOT NULL DEFAULT 0",
         "total_aventuras": "INTEGER NOT NULL DEFAULT 0",
+        "juramento": "TEXT",
+        "juramento_escolhido_em": "TEXT",
     }
     cols = {row[1] for row in conn.execute("PRAGMA table_info(players)").fetchall()}
     for name, ddl in required.items():
@@ -179,6 +181,17 @@ def init_db() -> None:
                 user_id TEXT NOT NULL,
                 entrada TEXT NOT NULL,
                 criado_em TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_marcos (
+                user_id TEXT NOT NULL,
+                marco_key TEXT NOT NULL,
+                descricao TEXT NOT NULL,
+                criado_em TEXT NOT NULL,
+                PRIMARY KEY (user_id, marco_key)
             )
             """
         )
@@ -254,6 +267,8 @@ def create_player(
         "last_aventura_at": "",
         "streak_aventura": 0,
         "total_aventuras": 0,
+        "juramento": "",
+        "juramento_escolhido_em": "",
     }
 
     table_info = get_players_table_info()
@@ -291,10 +306,39 @@ def add_annal_entry(user_id: str, entrada: str) -> None:
         conn.commit()
 
 
+def add_player_marco(user_id: str, marco_key: str, descricao: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO player_marcos (user_id, marco_key, descricao, criado_em)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, marco_key, descricao, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+
+
+def get_player_marcos(user_id: str) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT marco_key, descricao, criado_em FROM player_marcos WHERE user_id = ? ORDER BY criado_em ASC",
+            (user_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_player_annals_count(user_id: str) -> int:
+    with get_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) FROM annals WHERE user_id = ?", (user_id,)).fetchone()
+        return int(row[0]) if row else 0
+
+
 def delete_player(user_id: str) -> None:
     with get_conn() as conn:
         conn.execute("DELETE FROM players WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM annals WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM player_marcos WHERE user_id = ?", (user_id,))
         conn.commit()
 
 
@@ -420,6 +464,21 @@ CLASSES: dict[str, dict[str, Any]] = {
     },
 }
 
+JURAMENTOS: dict[str, str] = {
+    "trono": "Ao Trono Velado — Minha lâmina serve a ordem do Império.",
+    "verdade": "À Verdade Oculta — Meu espírito busca o que foi interditado.",
+    "fronteira": "À Fronteira Eterna — Meu passo protege o limite do mundo.",
+    "cinzas": "Às Cinzas da Queda — Minha memória vigia os erros antigos.",
+}
+
+TRILHAS: list[tuple[str, int]] = [
+    ("Iniciado", 0),
+    ("Reconhecido", 3),
+    ("Notável", 7),
+    ("Venerável", 12),
+    ("Lenda", 18),
+]
+
 
 def build_iniciar_embed() -> discord.Embed:
     embed = discord.Embed(
@@ -482,12 +541,86 @@ def register_class_for_user(user_id: str, classe_id: str) -> tuple[bool, str]:
         )
         try:
             add_annal_entry(user_id, f"Ritual do Despertar concluído. Caminho selado: {data['nome']}.")
+            add_player_marco(user_id, "despertar", "Despertar concluído")
         except sqlite3.Error:
             logger.exception("Falha ao registrar entrada nos Anais; cadastro principal mantido")
         return True, data["nome"]
     except sqlite3.Error:
         logger.exception("Falha SQLite ao registrar classe")
         return False, "Falha temporária de persistência do Grimório. Tente novamente em alguns segundos."
+
+
+
+def parse_iso_datetime(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def get_trilha_status(player: dict[str, Any]) -> dict[str, Any]:
+    criado_em = parse_iso_datetime(player.get("criado_em"))
+    agora = datetime.now(timezone.utc)
+    dias_desde_despertar = max((agora - criado_em).days, 0) if criado_em else 0
+    annals_count = get_player_annals_count(str(player.get("user_id", "")))
+    prestigio = int(player.get("prestigio") or 0)
+
+    score = annals_count + (dias_desde_despertar // 7) + (prestigio // 10)
+
+    atual_nome = TRILHAS[0][0]
+    proximo_nome: str | None = None
+    progresso_atual = score
+    progresso_necessario = TRILHAS[1][1] if len(TRILHAS) > 1 else TRILHAS[0][1]
+
+    for i, (nome, requisito) in enumerate(TRILHAS):
+        if score >= requisito:
+            atual_nome = nome
+            progresso_atual = score - requisito
+            if i + 1 < len(TRILHAS):
+                proximo_nome = TRILHAS[i + 1][0]
+                progresso_necessario = TRILHAS[i + 1][1] - requisito
+            else:
+                proximo_nome = None
+                progresso_necessario = 0
+
+    return {
+        "atual": atual_nome,
+        "proximo": proximo_nome,
+        "score": score,
+        "annals": annals_count,
+        "dias": dias_desde_despertar,
+        "prestigio": prestigio,
+        "progresso_atual": progresso_atual,
+        "progresso_necessario": progresso_necessario,
+    }
+
+
+def set_player_juramento(user_id: str, juramento_key: str) -> None:
+    agora = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE players SET juramento = ?, juramento_escolhido_em = ? WHERE user_id = ?",
+            (juramento_key, agora, user_id),
+        )
+        conn.commit()
+
+
+def can_change_juramento(player: dict[str, Any], cooldown_days: int = 30) -> tuple[bool, int]:
+    escolhido_em = parse_iso_datetime(player.get("juramento_escolhido_em"))
+    if not escolhido_em:
+        return True, 0
+
+    agora = datetime.now(timezone.utc)
+    liberacao = escolhido_em + timedelta(days=cooldown_days)
+    restante = liberacao - agora
+    if restante.total_seconds() <= 0:
+        return True, 0
+
+    dias_restantes = max(restante.days + (1 if restante.seconds > 0 else 0), 1)
+    return False, dias_restantes
+
 
 # ============================================================
 # 6) UI
@@ -667,6 +800,115 @@ async def classe(ctx: commands.Context, *, classe_id: str | None = None) -> None
         await send_grimoire_error(ctx, "classe", command_name="classe", user_id=str(ctx.author.id), error=exc)
 
 
+def normalize_juramento_input(raw: str) -> str:
+    aliases = {
+        "trono": "trono",
+        "ao trono": "trono",
+        "verdade": "verdade",
+        "verdade oculta": "verdade",
+        "fronteira": "fronteira",
+        "a fronteira": "fronteira",
+        "cinzas": "cinzas",
+        "as cinzas": "cinzas",
+    }
+    return aliases.get(raw.strip().lower(), "")
+
+
+@bot.command(name="juramento")
+async def juramento(ctx: commands.Context, *, escolha: str | None = None) -> None:
+    try:
+        user_id = str(ctx.author.id)
+        player = get_player(user_id)
+        if not player:
+            await ctx.send(canon_line("recusa", "Nenhum registro foi encontrado. Invoque `!iniciar` primeiro."))
+            return
+
+        if int(player.get("is_excecao", 0)) == 1:
+            await ctx.send(canon_line("recusa", "A assinatura ABSOLUTA não se curva a juramentos comuns."))
+            return
+
+        if not escolha:
+            opcoes = "\n".join(f"• `{k}` — {v}" for k, v in JURAMENTOS.items())
+            await ctx.send(canon_line("abertura", f"Selos canônicos disponíveis:\n{opcoes}\n\nUso: `!juramento <opção>`."))
+            return
+
+        juramento_key = normalize_juramento_input(escolha)
+        if juramento_key not in JURAMENTOS:
+            await ctx.send(canon_line("recusa", "Juramento inválido. Use `!juramento` para listar os selos canônicos."))
+            return
+
+        atual = str(player.get("juramento") or "").strip().lower()
+        if atual == juramento_key:
+            await ctx.send(canon_line("recusa", "Este juramento já está selado em teu nome."))
+            return
+
+        if atual:
+            permitido, dias_restantes = can_change_juramento(player, cooldown_days=30)
+            if not permitido:
+                await ctx.send(canon_line("recusa", f"Teu voto ainda ecoa. Nova troca disponível em aproximadamente {dias_restantes} dia(s)."))
+                return
+
+        set_player_juramento(user_id, juramento_key)
+        add_player_marco(user_id, "juramento_selado", "Juramento selado")
+        add_annal_entry(user_id, f"Juramento selado: {JURAMENTOS[juramento_key]}")
+        await ctx.send(canon_line("sucesso", f"Juramento inscrito: **{JURAMENTOS[juramento_key]}**"))
+    except Exception as exc:
+        logger.exception("Falha no comando !juramento")
+        await send_grimoire_error(ctx, "juramento", command_name="juramento", user_id=str(ctx.author.id), error=exc)
+
+
+@bot.command(name="trilha")
+async def trilha(ctx: commands.Context) -> None:
+    try:
+        user_id = str(ctx.author.id)
+        player = get_player(user_id)
+        if not player:
+            await ctx.send(canon_line("recusa", "Nenhum registro foi encontrado. Invoque `!iniciar`."))
+            return
+
+        status = get_trilha_status(player)
+        if status["proximo"]:
+            progresso = f"{status['progresso_atual']}/{status['progresso_necessario']}"
+            proximo = f"**Próximo degrau:** {status['proximo']} ({progresso})"
+        else:
+            proximo = "**Próximo degrau:** nenhum — tua trilha já alcançou o ápice."
+
+        await ctx.send(
+            canon_line(
+                "abertura",
+                (
+                    f"**Posição narrativa:** {status['atual']}\n"
+                    f"{proximo}\n"
+                    f"Critérios atuais: registros `{status['annals']}`, dias desde despertar `{status['dias']}`, prestígio `{status['prestigio']}`."
+                ),
+            )
+        )
+    except Exception as exc:
+        logger.exception("Falha no comando !trilha")
+        await send_grimoire_error(ctx, "trilha", command_name="trilha", user_id=str(ctx.author.id), error=exc)
+
+
+@bot.command(name="legado")
+async def legado(ctx: commands.Context) -> None:
+    try:
+        user_id = str(ctx.author.id)
+        player = get_player(user_id)
+        if not player:
+            await ctx.send(canon_line("recusa", "Nenhum registro foi encontrado. Invoque `!iniciar`."))
+            return
+
+        marcos = get_player_marcos(user_id)
+        if not marcos:
+            await ctx.send(canon_line("abertura", "Teu legado ainda está em branco. Nenhum marco histórico foi selado."))
+            return
+
+        linhas = [f"• {m['descricao']} (`{m['criado_em'][:10]}`)" for m in marcos[:10]]
+        await ctx.send(canon_line("abertura", "**Marcas históricas:**\n" + "\n".join(linhas)))
+    except Exception as exc:
+        logger.exception("Falha no comando !legado")
+        await send_grimoire_error(ctx, "legado", command_name="legado", user_id=str(ctx.author.id), error=exc)
+
+
 @bot.command(name="perfil")
 async def perfil(ctx: commands.Context) -> None:
     try:
@@ -692,9 +934,15 @@ async def perfil(ctx: commands.Context) -> None:
 
         classe_id = player["classe"]
         classe_nome = CLASSES.get(classe_id, {}).get("nome", classe_id.title())
+        juramento_key = str(player.get("juramento") or "").strip().lower()
+        juramento_texto = JURAMENTOS.get(juramento_key, "Ainda não selado. Use `!juramento <opção>`.")
+        trilha = get_trilha_status(player)
+
         embed = discord.Embed(title="GRIMÓRIO DO DESTINO", description=canon_line("abertura"), color=EMBED_COLOR)
         embed.add_field(name="Identidade", value=f"**Nome:** {ctx.author.display_name}\n**Classe:** {classe_nome}\n**Título:** {player['titulo']}", inline=False)
         embed.add_field(name="Essência", value=f"**FOR:** {player['forca']} | **RES:** {player['resistencia']} | **AGI:** {player['agilidade']} | **INT:** {player['inteligencia']} | **MAN:** {player['mana']}", inline=False)
+        embed.add_field(name="Juramento", value=juramento_texto, inline=False)
+        embed.add_field(name="Trilha", value=trilha["atual"], inline=False)
         embed.add_field(name="Caminho Escolhido", value=player["lore_texto"], inline=False)
         embed.add_field(name="Tendência de Crescimento", value=player["crescimento"], inline=False)
         embed.add_field(name="Presságio", value=player["pressagio"], inline=False)
@@ -744,12 +992,10 @@ async def eu(ctx: commands.Context) -> None:
 @bot.command(name="changelog")
 async def changelog(ctx: commands.Context) -> None:
     embed = discord.Embed(title="Changelog — Núcleo do Jogador", color=EMBED_COLOR)
-    embed.description = (
-        "**Etapa 0 — Fundação técnica e padrão canônico**\n"
-        "• Observabilidade com Selo de Falha persistente\n"
-        "• Migração segura do SQLite sem alterar experiência\n"
-        "• Voz ritualística padronizada (abertura/sucesso/recusa)"
-    )
+    embed.description = """**Etapa 1 — Progressão narrativa canônica**
+• `!juramento` com escolha única e troca por cooldown longo
+• `!trilha` com posição narrativa e próximo degrau
+• `!legado` com marcos históricos persistidos"""
     embed.set_footer(text="EBR • Base estável")
     await ctx.send(embed=embed)
 
@@ -816,8 +1062,8 @@ async def guia(ctx: commands.Context) -> None:
         description="Fase estável ativa: identidade canônica e registros persistentes.",
         color=EMBED_COLOR,
     )
-    embed.add_field(name="Comandos", value="`!iniciar` • `!classe` • `!perfil` • `!resetar @membro` • `!eu` • `!changelog` • `!guia` • `!diagnostico`", inline=False)
-    embed.add_field(name="Estado Atual", value="Etapa 0: fundação técnica e padrão canônico. Sem novos loops de gameplay/social.", inline=False)
+    embed.add_field(name="Comandos", value="`!iniciar` • `!classe` • `!juramento` • `!trilha` • `!legado` • `!perfil` • `!resetar @membro` • `!eu` • `!changelog` • `!guia` • `!diagnostico`", inline=False)
+    embed.add_field(name="Estado Atual", value="Etapa 1: progressão narrativa (juramento, trilha e legado), sem power creep.", inline=False)
     embed.set_footer(text="EBR • Orientação oficial")
     await ctx.send(embed=embed)
 
