@@ -264,6 +264,40 @@ def player_exists(user_id: str) -> bool:
     return get_player(user_id) is not None
 
 
+def get_recent_failures(limit: int = 5) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT command_name, timestamp_utc, user_id, hash_curto, error_text FROM failure_logs ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_db_diagnostics() -> dict[str, Any]:
+    db_exists = DB_PATH.exists()
+    data_dir_exists = DATA_DIR.exists()
+    writable = os.access(DATA_DIR, os.W_OK) if data_dir_exists else False
+
+    details: dict[str, Any] = {
+        "db_path": str(DB_PATH),
+        "db_exists": db_exists,
+        "data_dir_exists": data_dir_exists,
+        "data_dir_writable": writable,
+        "players_count": 0,
+        "failure_count": 0,
+    }
+
+    if not db_exists:
+        return details
+
+    with get_conn() as conn:
+        details["players_count"] = conn.execute("SELECT COUNT(*) FROM players").fetchone()[0]
+        details["failure_count"] = conn.execute("SELECT COUNT(*) FROM failure_logs").fetchone()[0]
+
+    return details
+
+
 def create_inkosi_record_if_needed(user_id: str) -> dict[str, Any]:
     existing = get_player(user_id)
     if existing:
@@ -658,6 +692,61 @@ async def changelog(ctx: commands.Context) -> None:
     await ctx.send(embed=embed)
 
 
+
+
+@bot.command(name="diagnostico")
+@commands.has_permissions(administrator=True)
+async def diagnostico(ctx: commands.Context) -> None:
+    try:
+        info = get_db_diagnostics()
+        failures = get_recent_failures(limit=5)
+
+        embed = discord.Embed(
+            title="DIAGNÓSTICO DO GRIMÓRIO",
+            description="Painel técnico para investigar selos de falha recentes.",
+            color=EMBED_COLOR,
+        )
+        embed.add_field(
+            name="Banco SQLite",
+            value=(
+                f"**Path:** `{info['db_path']}`\n"
+                f"**Arquivo existe:** {info['db_exists']}\n"
+                f"**Diretório existe:** {info['data_dir_exists']}\n"
+                f"**Diretório gravável:** {info['data_dir_writable']}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Contadores",
+            value=(
+                f"**Players:** {info['players_count']}\n"
+                f"**Falhas registradas:** {info['failure_count']}"
+            ),
+            inline=False,
+        )
+
+        if failures:
+            lines = []
+            for row in failures:
+                lines.append(
+                    f"`{row['timestamp_utc'][:19]}` • `{row['command_name']}` • `{row['hash_curto']}` • uid `{row['user_id']}`"
+                )
+            embed.add_field(name="Últimos selos", value="\n".join(lines[:5]), inline=False)
+
+        embed.set_footer(text="Etapa 0 • Observabilidade canônica")
+        await ctx.send(embed=embed)
+    except Exception as exc:
+        logger.exception("Falha no comando !diagnostico")
+        await send_grimoire_error(ctx, "diagnostico", command_name="diagnostico", user_id=str(ctx.author.id), error=exc)
+
+@diagnostico.error
+async def diagnostico_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send(canon_line("recusa", "Somente administradores podem invocar `!diagnostico`."))
+    else:
+        logger.exception("Erro não tratado em !diagnostico", exc_info=error)
+        await send_grimoire_error(ctx, "diagnostico.error", command_name="diagnostico.error", user_id=str(ctx.author.id), error=error)
+
 @bot.command(name="guia")
 async def guia(ctx: commands.Context) -> None:
     embed = discord.Embed(
@@ -665,7 +754,7 @@ async def guia(ctx: commands.Context) -> None:
         description="Fase estável ativa: identidade canônica e registros persistentes.",
         color=EMBED_COLOR,
     )
-    embed.add_field(name="Comandos", value="`!iniciar` • `!classe` • `!perfil` • `!resetar @membro` • `!eu` • `!changelog` • `!guia`", inline=False)
+    embed.add_field(name="Comandos", value="`!iniciar` • `!classe` • `!perfil` • `!resetar @membro` • `!eu` • `!changelog` • `!guia` • `!diagnostico`", inline=False)
     embed.add_field(name="Estado Atual", value="Etapa 0: fundação técnica e padrão canônico. Sem novos loops de gameplay/social.", inline=False)
     embed.set_footer(text="EBR • Orientação oficial")
     await ctx.send(embed=embed)
