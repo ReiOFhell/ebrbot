@@ -120,17 +120,9 @@ async def send_grimoire_error(
 
 
 def ensure_columns(conn: sqlite3.Connection) -> None:
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(players)").fetchall()}
-    required = {
-        "ouro": "INTEGER NOT NULL DEFAULT 0",
-        "prestigio": "INTEGER NOT NULL DEFAULT 0",
-        "last_aventura_at": "TEXT",
-        "streak_aventura": "INTEGER NOT NULL DEFAULT 0",
-        "total_aventuras": "INTEGER NOT NULL DEFAULT 0",
-    }
-    for col, ddl in required.items():
-        if col not in cols:
-            conn.execute(f"ALTER TABLE players ADD COLUMN {col} {ddl}")
+    # Etapa 0: manter compatibilidade ampla sem depender de colunas de fases futuras.
+    # A função permanece para migrações incrementais futuras sem alterar experiência atual.
+    _ = conn
 
 
 def init_db() -> None:
@@ -210,14 +202,9 @@ def create_player(
             INSERT OR REPLACE INTO players (
                 user_id, classe, is_excecao, nivel, criado_em,
                 forca, resistencia, agilidade, inteligencia, mana,
-                crescimento, titulo, lore_texto, pressagio,
-                ouro, prestigio, last_aventura_at, streak_aventura, total_aventuras
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      COALESCE((SELECT ouro FROM players WHERE user_id = ?), 0),
-                      COALESCE((SELECT prestigio FROM players WHERE user_id = ?), 0),
-                      (SELECT last_aventura_at FROM players WHERE user_id = ?),
-                      COALESCE((SELECT streak_aventura FROM players WHERE user_id = ?), 0),
-                      COALESCE((SELECT total_aventuras FROM players WHERE user_id = ?), 0))
+                crescimento, titulo, lore_texto, pressagio
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -234,11 +221,6 @@ def create_player(
                 titulo,
                 lore_texto,
                 pressagio,
-                user_id,
-                user_id,
-                user_id,
-                user_id,
-                user_id,
             ),
         )
         conn.commit()
