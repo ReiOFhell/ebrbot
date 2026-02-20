@@ -14,7 +14,16 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "nucleoc.db"
 
-TOKEN = (os.getenv("DISCORD_TOKEN") or "").strip()
+DISCORD_TOKEN_FALLBACK = ""  # opcional: cole aqui apenas para teste local
+
+
+def resolve_token() -> str:
+    token = (os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or DISCORD_TOKEN_FALLBACK or "").strip()
+    if not token:
+        raise RuntimeError(
+            "Token não encontrado. Defina a variável de ambiente DISCORD_TOKEN (ou BOT_TOKEN)."
+        )
+    return token
 
 intents = discord.Intents.default()
 intents.guilds = True
@@ -301,9 +310,11 @@ async def on_ready() -> None:
 
 def main() -> None:
     init_db()
-    if not TOKEN:
-        raise SystemExit("Defina DISCORD_TOKEN no ambiente.")
-    bot.run(TOKEN)
+    try:
+        token = resolve_token()
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+    bot.run(token)
 
 
 if __name__ == "__main__":
