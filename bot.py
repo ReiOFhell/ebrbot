@@ -864,11 +864,17 @@ def build_iniciar_embed() -> discord.Embed:
         ),
         color=EMBED_COLOR,
     )
+    embed.add_field(
+        name="Comece aqui",
+        value="1) Escolhe tua classe nos botões abaixo.\n2) Depois invoca `!perfil` para ler teu Registro.",
+        inline=False,
+    )
     for data in CLASSES.values():
         embed.add_field(name=f"{data['icone']} {data['nome']}", value=data["frase"], inline=False)
 
-    embed.set_footer(text="FASE 1 — Núcleo do Jogador • O destino começa aqui")
+    embed.set_footer(text="FASE 1 — Núcleo do Jogador • Escolha, sele e consulte `!perfil`")
     return embed
+
 
 def normalize_class_input(raw: str) -> str:
     aliases = {
@@ -1117,7 +1123,7 @@ async def iniciar(ctx: commands.Context) -> None:
             return
 
         if player_exists(user_id):
-            await ctx.send(canon_line("recusa", "Teu nome já repousa no Grimório. Usa `!perfil`."))
+            await ctx.send(canon_line("recusa", "Teu Registro já repousa no Grimório. As runas recomendam: `!perfil`."))
             return
 
         embed = build_iniciar_embed()
@@ -1157,7 +1163,7 @@ async def classe(ctx: commands.Context, *, classe_id: str | None = None) -> None
         data = CLASSES[cid]
         embed = discord.Embed(
             title="RITUAL CONCLUÍDO",
-            description=canon_line("sucesso", f"**{ctx.author.display_name}** foi inscrito como **{result}**."),
+            description=canon_line("sucesso", f"**{ctx.author.display_name}** foi inscrito como **{result}**. O Arquivo aguarda tua leitura em `!perfil`."),
             color=EMBED_COLOR,
         )
         embed.add_field(name="Título", value=data["titulo"], inline=False)
@@ -1543,20 +1549,55 @@ async def perfil(ctx: commands.Context) -> None:
             await ctx.send(embed=embed)
             return
 
-        classe_id = player["classe"]
+        classe_id = str(player.get("classe") or "desconhecido")
         classe_nome = CLASSES.get(classe_id, {}).get("nome", classe_id.title())
+        titulo = str(player.get("titulo") or "— não registrado")
+        pressagio = str(player.get("pressagio") or "— não registrado")
         juramento_key = str(player.get("juramento") or "").strip().lower()
-        juramento_texto = JURAMENTOS.get(juramento_key, "Ainda não selado. Use `!juramento <opção>`.")
+        juramento_texto = JURAMENTOS.get(juramento_key, "— não selado")
         trilha = get_trilha_status(player)
+        faccao_key = str(player.get("faccao_alinhada") or "").strip().lower()
+        faccao_texto = FACTIONS.get(faccao_key, "— não selado")
+        reputacoes = get_player_faction_points(user_id)
+        reputacao_faccao = reputation_label(reputacoes.get(faccao_key, 0)) if faccao_key in reputacoes else "— não registrado"
+        legado = get_player_marcos(user_id)
+        legado_texto = legado[-1]["descricao"] if legado else "— não registrado"
+        criado_em = str(player.get("criado_em") or "")
+        registro_data = criado_em[:10] if criado_em else "— não registrado"
+        selo_registro = short_hash("registro", str(player.get("criado_em") or ""), user_id)
 
         embed = discord.Embed(title="GRIMÓRIO DO DESTINO", description=canon_line("abertura"), color=EMBED_COLOR)
-        embed.add_field(name="Identidade", value=f"**Nome:** {ctx.author.display_name}\n**Classe:** {classe_nome}\n**Título:** {player['titulo']}", inline=False)
-        embed.add_field(name="Essência", value=f"**FOR:** {player['forca']} | **RES:** {player['resistencia']} | **AGI:** {player['agilidade']} | **INT:** {player['inteligencia']} | **MAN:** {player['mana']}", inline=False)
-        embed.add_field(name="Juramento", value=juramento_texto, inline=False)
-        embed.add_field(name="Trilha", value=trilha["atual"], inline=False)
-        embed.add_field(name="Caminho Escolhido", value=player["lore_texto"], inline=False)
-        embed.add_field(name="Tendência de Crescimento", value=player["crescimento"], inline=False)
-        embed.add_field(name="Presságio", value=player["pressagio"], inline=False)
+        embed.add_field(
+            name="Identidade",
+            value=(
+                f"**Nome:** {ctx.author.display_name}\n"
+                f"**Classe:** {classe_nome}\n"
+                f"**Título:** {titulo}\n"
+                f"**Presságio:** {pressagio}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Atributos",
+            value=(
+                f"**FOR:** {player.get('forca', '—')} | **RES:** {player.get('resistencia', '—')}\n"
+                f"**AGI:** {player.get('agilidade', '—')} | **INT:** {player.get('inteligencia', '—')}\n"
+                f"**MAN:** {player.get('mana', '—')}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Registro",
+            value=f"**Data de inscrição:** {registro_data}\n**Selo canônico:** `{selo_registro}`",
+            inline=False,
+        )
+        embed.add_field(name="Juramento", value=juramento_texto, inline=True)
+        embed.add_field(name="Trilha", value=trilha.get("atual", "— não registrado"), inline=True)
+        embed.add_field(name="Facção", value=faccao_texto, inline=True)
+        embed.add_field(name="Reputação", value=reputacao_faccao, inline=True)
+        embed.add_field(name="Legado recente", value=legado_texto, inline=True)
+        embed.add_field(name="Crescimento", value=str(player.get("crescimento") or "— não registrado"), inline=True)
+        embed.add_field(name="Caminho Escolhido", value=str(player.get("lore_texto") or "— não registrado"), inline=False)
         embed.set_footer(text="FASE 1 — Núcleo do Jogador • Registro canônico")
         await ctx.send(embed=embed)
     except Exception as exc:
@@ -1587,7 +1628,7 @@ async def resetar(ctx: commands.Context, membro: discord.Member) -> None:
 @resetar.error
 async def resetar_error(ctx: commands.Context, error: commands.CommandError) -> None:
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send(canon_line("recusa", "Somente administradores podem decretar a Revogação do Registro."))
+        await ctx.send(canon_line("recusa", "As runas de autoridade barram teu intento. Somente administradores decretam a Revogação do Registro."))
     elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.send(canon_line("recusa", "Uso correto: `!resetar @membro`"))
     else:
@@ -1669,7 +1710,7 @@ async def diagnostico(ctx: commands.Context) -> None:
 @diagnostico.error
 async def diagnostico_error(ctx: commands.Context, error: commands.CommandError) -> None:
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send(canon_line("recusa", "Somente administradores podem invocar `!diagnostico`."))
+        await ctx.send(canon_line("recusa", "As runas de autoridade barram teu intento. `!diagnostico` é um selo administrativo."))
     else:
         logger.exception("Erro não tratado em !diagnostico", exc_info=error)
         await send_grimoire_error(ctx, "diagnostico.error", command_name="diagnostico.error", user_id=str(ctx.author.id), error=error)
@@ -1678,13 +1719,24 @@ async def diagnostico_error(ctx: commands.Context, error: commands.CommandError)
 async def guia(ctx: commands.Context) -> None:
     embed = discord.Embed(
         title="Guia do Grimório — EBR",
-        description="Fase estável ativa: identidade canônica e registros persistentes.",
+        description="Orientação oficial para tua primeira semana no Arquivo Imperial.",
         color=EMBED_COLOR,
     )
-    embed.add_field(name="Comandos", value="`!iniciar` • `!classe` • `!juramento` • `!trilha` • `!legado` • `!oraculo` • `!conselho` • `!decreto` • `!intriga` • `!anaisglobal` • `!alinhar` • `!reputacao` • `!mandato` • `!perfil` • `!resetar @membro` • `!eu` • `!changelog` • `!guia` • `!diagnostico`", inline=False)
-    embed.add_field(name="Estado Atual", value="Etapa 4: facções vivas com alinhamento, reputação e mandato social.", inline=False)
-    embed.set_footer(text="EBR • Orientação oficial")
+    embed.add_field(name="Comece aqui", value="1) `!iniciar`\n2) `!perfil`", inline=False)
+    embed.add_field(
+        name="Depois disso…",
+        value="O mundo permanece congelado na Fase 1 para consolidar identidade, registro e leitura de destino.",
+        inline=False,
+    )
+    embed.add_field(
+        name="Comandos de jogador",
+        value="`!iniciar` • `!classe` • `!perfil` • `!juramento` • `!trilha` • `!legado` • `!oraculo` • `!conselho` • `!intriga` • `!anaisglobal` • `!alinhar` • `!reputacao` • `!mandato` • `!eu` • `!changelog` • `!guia`",
+        inline=False,
+    )
+    embed.add_field(name="Comandos administrativos", value="`!resetar @membro` • `!decreto <texto>` • `!diagnostico`", inline=False)
+    embed.set_footer(text="EBR • As runas lembram: teu próximo passo é `!perfil`.")
     await ctx.send(embed=embed)
+
 
 # ============================================================
 # 8) EVENTOS
