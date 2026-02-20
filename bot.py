@@ -242,22 +242,25 @@ def init_db() -> None:
 def get_or_create_domain(user_id: str) -> sqlite3.Row:
     ts = now_ts()
     with get_conn() as conn:
+        # Migração defensiva: contas antigas podem existir em `domains` sem linhas irmãs.
         domain = conn.execute("SELECT * FROM domains WHERE user_id = ?", (user_id,)).fetchone()
         if not domain:
             conn.execute("INSERT INTO domains (user_id, created_at_ts) VALUES (?, ?)", (user_id, ts))
-            conn.execute(
-                "INSERT INTO domain_buildings (user_id, updated_at_ts) VALUES (?, ?)",
-                (user_id, ts),
-            )
-            conn.execute(
-                "INSERT INTO resources (user_id, last_collect_ts, updated_at_ts) VALUES (?, ?, ?)",
-                (user_id, ts, ts),
-            )
-            conn.execute(
-                "INSERT INTO army (user_id, last_train_ts, updated_at_ts) VALUES (?, ?, ?)",
-                (user_id, ts, ts),
-            )
-            conn.commit()
+
+        # Garante linhas relacionadas mesmo para usuários já existentes de versões anteriores.
+        conn.execute(
+            "INSERT OR IGNORE INTO domain_buildings (user_id, updated_at_ts) VALUES (?, ?)",
+            (user_id, ts),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO resources (user_id, last_collect_ts, updated_at_ts) VALUES (?, ?, ?)",
+            (user_id, ts, ts),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO army (user_id, last_train_ts, updated_at_ts) VALUES (?, ?, ?)",
+            (user_id, ts, ts),
+        )
+        conn.commit()
 
         return conn.execute(
             """
