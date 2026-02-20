@@ -1,1810 +1,309 @@
-# ============================================================
-# 1) IMPORTS
-# ============================================================
-import hashlib
 import logging
 import os
 import sqlite3
-from datetime import datetime, timedelta, timezone
+import time
 from pathlib import Path
-from typing import Any
 
 import discord
 from discord.ext import commands
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logger = logging.getLogger("ebr.nucleoc")
 
-# ============================================================
-# 2) CONFIG E INTENTS
-# ============================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-logger = logging.getLogger("ebr.grimorio")
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+DB_PATH = DATA_DIR / "nucleoc.db"
+
+TOKEN = (os.getenv("DISCORD_TOKEN") or "").strip()
 
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
 intents.messages = True
 intents.message_content = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-
-# ============================================================
-# 3) CONSTANTES
-# ============================================================
-INKOSI_ID = "1187734043236778027"
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-DB_PATH = DATA_DIR / "players.db"
-
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-DISCORD_TOKEN_FALLBACK = "COLE_SEU_TOKEN_AQUI"
-
-EMBED_COLOR = discord.Color.from_rgb(45, 18, 54)
-
-VOICE = {
-    "abertura": "✦ O Grimório abre suas páginas sob teu nome.",
-    "sucesso": "✦ O selo foi aceito pelos arquivos imperiais.",
-    "recusa": "✦ O rito foi recusado; o destino exige outro passo.",
-    "erro": "O Grimório está em silêncio.",
-}
-
-
-def env_flag(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on", "sim"}
-
-FEATURE_FLAGS = {
-    "NUCLEO_C_ENABLED": env_flag("NUCLEO_C_ENABLED", default=False),
-}
-
-
-# ============================================================
-# 4) BANCO (SQLITE HELPERS + MIGRAÇÕES)
-# ============================================================
-def resolve_token() -> str:
-    token_env = (DISCORD_TOKEN or "").strip().strip('"').strip("'")
-    token_fallback = (DISCORD_TOKEN_FALLBACK or "").strip().strip('"').strip("'")
-    token = token_env if token_env else token_fallback
-
-    if not token or token == "COLE_SEU_TOKEN_AQUI":
-        raise RuntimeError("Defina DISCORD_TOKEN no ambiente ou preencha DISCORD_TOKEN_FALLBACK.")
-
-    if token.count(".") < 2:
-        raise RuntimeError("DISCORD_TOKEN parece inválido (formato inesperado).")
-
-    return token
+BARN_BASE_PROD = 12000  # ouro/h no nível 1
+BARRACKS_BASE_TRAIN = 10  # tropas a cada 30 min no nível 1
+TRAIN_COOLDOWN_SECONDS = 30 * 60
+COLLECT_CAP_SECONDS = 24 * 60 * 60
 
 
 def get_conn() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(DB_PATH)
-
-
-def canon_line(kind: str, extra: str | None = None) -> str:
-    base = VOICE.get(kind, VOICE["erro"])
-    return f"{base}\n{extra}" if extra else base
-
-
-def short_hash(command_name: str, timestamp_utc: str, user_id: str) -> str:
-    raw = f"{command_name}|{timestamp_utc}|{user_id}".encode("utf-8")
-    return hashlib.sha1(raw).hexdigest()[:8].upper()
-
-
-def options_bulleted_text(options: dict[str, Any], label_key: str | None = None) -> str:
-    if label_key:
-        return "\n".join(f"• `{key}` — {str(meta.get(label_key, key))}" for key, meta in options.items())
-    return "\n".join(f"• `{key}` — {value}" for key, value in options.items())
-
-
-def parse_typed_line(raw: str | None, allowed_types: set[str]) -> tuple[str, str] | None:
-    if not raw:
-        return None
-
-    parts = raw.strip().split(maxsplit=1)
-    if not parts:
-        return None
-
-    event_type = parts[0].lower()
-    detail = parts[1].strip() if len(parts) > 1 else ""
-    if event_type not in allowed_types or not detail:
-        return None
-
-    return event_type, detail
-
-
-async def get_registered_player_or_reply(
-    ctx: commands.Context,
-    user_id: str,
-    *,
-    not_found_text: str,
-    include_inkosi_exception: bool = False,
-) -> dict[str, Any] | None:
-    player = create_inkosi_record_if_needed(user_id) if include_inkosi_exception and user_id == INKOSI_ID else get_player(user_id)
-    if not player:
-        await ctx.send(canon_line("recusa", not_found_text))
-        return None
-    return player
-
-
-def log_failure(command_name: str, user_id: str, error_text: str) -> str:
-    ts = datetime.now(timezone.utc).isoformat()
-    seal = short_hash(command_name, ts, user_id)
-    with get_conn() as conn:
-        conn.execute(
-            """
-            INSERT INTO failure_logs (command_name, timestamp_utc, user_id, hash_curto, error_text)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (command_name, ts, user_id, seal, error_text),
-        )
-        conn.commit()
-    return seal
-
-
-async def send_grimoire_error(
-    ctx: commands.Context,
-    tag: str,
-    *,
-    command_name: str | None = None,
-    user_id: str | None = None,
-    error: Exception | None = None,
-) -> None:
-    command_ref = command_name or tag
-    uid = user_id or str(ctx.author.id if ctx.author else "0")
-    err_text = str(error) if error else "erro não informado"
-    seal = "SEM_SELO"
-    try:
-        seal = log_failure(command_ref, uid, err_text)
-    except Exception:
-        logger.exception("Falha ao registrar failure_logs")
-
-    await ctx.send(f"{VOICE['erro']} Selo de falha: {tag}-{seal}.")
-
-
-def ensure_columns(conn: sqlite3.Connection) -> None:
-    # Etapa 0: garante apenas colunas canônicas da Fase 1 (sem gameplay extra).
-    required = {
-        "user_id": "TEXT",
-        "classe": "TEXT",
-        "is_excecao": "INTEGER DEFAULT 0",
-        "nivel": "TEXT",
-        "criado_em": "TEXT",
-        "forca": "TEXT",
-        "resistencia": "TEXT",
-        "agilidade": "TEXT",
-        "inteligencia": "TEXT",
-        "mana": "TEXT",
-        "crescimento": "TEXT",
-        "titulo": "TEXT",
-        "lore_texto": "TEXT",
-        "pressagio": "TEXT",
-        # Compatibilidade com schemas legados de versões anteriores (Fase 2 revertida)
-        "ouro": "INTEGER NOT NULL DEFAULT 0",
-        "prestigio": "INTEGER NOT NULL DEFAULT 0",
-        "last_aventura_at": "TEXT",
-        "streak_aventura": "INTEGER NOT NULL DEFAULT 0",
-        "total_aventuras": "INTEGER NOT NULL DEFAULT 0",
-        "juramento": "TEXT",
-        "juramento_escolhido_em": "TEXT",
-        "faccao_alinhada": "TEXT",
-        "faccao_alinhada_em": "TEXT",
-    }
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(players)").fetchall()}
-    for name, ddl in required.items():
-        if name not in cols:
-            conn.execute(f"ALTER TABLE players ADD COLUMN {name} {ddl}")
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def init_db() -> None:
     with get_conn() as conn:
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS players (
+            CREATE TABLE IF NOT EXISTS domains (
                 user_id TEXT PRIMARY KEY,
-                classe TEXT NOT NULL,
-                is_excecao INTEGER DEFAULT 0,
-                nivel TEXT,
-                criado_em TEXT,
-                forca TEXT,
-                resistencia TEXT,
-                agilidade TEXT,
-                inteligencia TEXT,
-                mana TEXT,
-                crescimento TEXT,
-                titulo TEXT,
-                lore_texto TEXT,
-                pressagio TEXT
-            )
-            """
-        )
-        ensure_columns(conn)
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS annals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT NOT NULL,
-                entrada TEXT NOT NULL,
-                criado_em TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS player_marcos (
-                user_id TEXT NOT NULL,
-                marco_key TEXT NOT NULL,
-                descricao TEXT NOT NULL,
-                criado_em TEXT NOT NULL,
-                PRIMARY KEY (user_id, marco_key)
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS world_state (
-                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
-                epoca_atual TEXT NOT NULL,
-                decreto_ativo TEXT NOT NULL,
-                tensao_fronteiras TEXT NOT NULL,
-                faccao_ascensao TEXT NOT NULL,
-                atualizado_em TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS council_sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                week_key TEXT NOT NULL UNIQUE,
-                status TEXT NOT NULL,
-                opened_by TEXT,
-                opened_at TEXT NOT NULL,
-                closed_at TEXT,
-                winning_option TEXT
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS council_votes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id INTEGER NOT NULL,
-                user_id TEXT NOT NULL,
-                option_key TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE(session_id, user_id)
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS global_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_type TEXT NOT NULL,
-                title TEXT NOT NULL,
-                detail TEXT,
-                actor_user_id TEXT,
-                created_em TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS player_faction_reputation (
-                user_id TEXT NOT NULL,
-                faction_key TEXT NOT NULL,
-                points INTEGER NOT NULL DEFAULT 0,
-                updated_em TEXT NOT NULL,
-                PRIMARY KEY (user_id, faction_key)
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS failure_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                command_name TEXT NOT NULL,
-                timestamp_utc TEXT NOT NULL,
-                user_id TEXT,
-                hash_curto TEXT NOT NULL,
-                error_text TEXT
+                gold INTEGER NOT NULL DEFAULT 100000,
+                prestige INTEGER NOT NULL DEFAULT 0,
+                power INTEGER NOT NULL DEFAULT 0,
+                barn_level INTEGER NOT NULL DEFAULT 1,
+                barracks_level INTEGER NOT NULL DEFAULT 1,
+                forge_level INTEGER NOT NULL DEFAULT 1,
+                troops INTEGER NOT NULL DEFAULT 0,
+                last_collect_ts INTEGER NOT NULL,
+                last_train_ts INTEGER NOT NULL,
+                created_at_ts INTEGER NOT NULL
             )
             """
         )
         conn.commit()
 
 
-def get_players_table_info() -> list[sqlite3.Row]:
+def now_ts() -> int:
+    return int(time.time())
+
+
+def get_or_create_domain(user_id: str) -> sqlite3.Row:
+    ts = now_ts()
     with get_conn() as conn:
-        conn.row_factory = sqlite3.Row
-        return conn.execute("PRAGMA table_info(players)").fetchall()
-
-
-def fallback_value_for_required_column(column: sqlite3.Row) -> Any:
-    declared_type = str(column["type"] or "").upper()
-    if any(token in declared_type for token in ("INT", "REAL", "NUM")):
-        return 0
-    return ""
-
-
-def get_player(user_id: str) -> dict[str, Any] | None:
-    with get_conn() as conn:
-        conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM players WHERE user_id = ?", (user_id,)).fetchone()
-        return dict(row) if row else None
-
-
-def create_player(
-    user_id: str,
-    classe_id: str,
-    *,
-    is_excecao: int,
-    nivel: str,
-    forca: str,
-    resistencia: str,
-    agilidade: str,
-    inteligencia: str,
-    mana: str,
-    crescimento: str,
-    titulo: str,
-    lore_texto: str,
-    pressagio: str,
-) -> None:
-    base_values: dict[str, Any] = {
-        "user_id": user_id,
-        "classe": classe_id,
-        "is_excecao": is_excecao,
-        "nivel": nivel,
-        "criado_em": datetime.now(timezone.utc).isoformat(),
-        "forca": forca,
-        "resistencia": resistencia,
-        "agilidade": agilidade,
-        "inteligencia": inteligencia,
-        "mana": mana,
-        "crescimento": crescimento,
-        "titulo": titulo,
-        "lore_texto": lore_texto,
-        "pressagio": pressagio,
-        # compat legada
-        "ouro": 0,
-        "prestigio": 0,
-        "last_aventura_at": "",
-        "streak_aventura": 0,
-        "total_aventuras": 0,
-        "juramento": "",
-        "juramento_escolhido_em": "",
-        "faccao_alinhada": "",
-        "faccao_alinhada_em": "",
-    }
-
-    table_info = get_players_table_info()
-    columns: list[str] = []
-    values: list[Any] = []
-    for row in table_info:
-        col = row["name"]
-        notnull = int(row["notnull"]) == 1
-        default = row["dflt_value"]
-
-        if col in base_values:
-            columns.append(col)
-            values.append(base_values[col])
-        elif notnull and default is None:
-            columns.append(col)
-            values.append(fallback_value_for_required_column(row))
-
-    if not columns:
-        raise RuntimeError("Schema inválido: tabela players sem colunas utilizáveis para INSERT.")
-
-    placeholders = ", ".join(["?"] * len(columns))
-    sql = f"INSERT OR REPLACE INTO players ({', '.join(columns)}) VALUES ({placeholders})"
-
-    with get_conn() as conn:
-        conn.execute(sql, values)
-        conn.commit()
-
-
-def add_annal_entry(user_id: str, entrada: str) -> None:
-    with get_conn() as conn:
-        conn.execute(
-            "INSERT INTO annals (user_id, entrada, criado_em) VALUES (?, ?, ?)",
-            (user_id, entrada, datetime.now(timezone.utc).isoformat()),
-        )
-        conn.commit()
-
-
-def add_player_marco(user_id: str, marco_key: str, descricao: str) -> None:
-    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM domains WHERE user_id = ?", (user_id,)).fetchone()
+        if row:
+            return row
         conn.execute(
             """
-            INSERT OR IGNORE INTO player_marcos (user_id, marco_key, descricao, criado_em)
+            INSERT INTO domains (user_id, last_collect_ts, last_train_ts, created_at_ts)
             VALUES (?, ?, ?, ?)
             """,
-            (user_id, marco_key, descricao, datetime.now(timezone.utc).isoformat()),
+            (user_id, ts, ts, ts),
         )
         conn.commit()
+        return conn.execute("SELECT * FROM domains WHERE user_id = ?", (user_id,)).fetchone()
 
 
-def get_player_marcos(user_id: str) -> list[dict[str, Any]]:
+def building_upgrade_cost(level: int, base: int) -> int:
+    return int(base * (2.55 ** (level - 1)))
+
+
+def barn_production_per_hour(level: int) -> int:
+    return int(BARN_BASE_PROD * (2.2 ** (level - 1)))
+
+
+def barracks_train_amount(level: int) -> int:
+    return int(BARRACKS_BASE_TRAIN * (2.2 ** (level - 1)))
+
+
+def recalc_power(troops: int, barracks_level: int, forge_level: int) -> int:
+    return int(troops + (barracks_level * 50) + (forge_level * 30))
+
+
+def update_domain(user_id: str, **fields: int) -> None:
+    if not fields:
+        return
+    keys = list(fields.keys())
+    assignments = ", ".join(f"{k} = ?" for k in keys)
+    values = [fields[k] for k in keys]
     with get_conn() as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT marco_key, descricao, criado_em FROM player_marcos WHERE user_id = ? ORDER BY criado_em ASC",
-            (user_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def get_player_annals_count(user_id: str) -> int:
-    with get_conn() as conn:
-        row = conn.execute("SELECT COUNT(*) FROM annals WHERE user_id = ?", (user_id,)).fetchone()
-        return int(row[0]) if row else 0
-
-
-def delete_player(user_id: str) -> None:
-    with get_conn() as conn:
-        conn.execute("DELETE FROM players WHERE user_id = ?", (user_id,))
-        conn.execute("DELETE FROM annals WHERE user_id = ?", (user_id,))
-        conn.execute("DELETE FROM player_marcos WHERE user_id = ?", (user_id,))
-        conn.execute("DELETE FROM player_faction_reputation WHERE user_id = ?", (user_id,))
+        conn.execute(f"UPDATE domains SET {assignments} WHERE user_id = ?", (*values, user_id))
         conn.commit()
 
 
-def player_exists(user_id: str) -> bool:
-    return get_player(user_id) is not None
+@bot.command(name="dominio")
+async def dominio(ctx: commands.Context) -> None:
+    user_id = str(ctx.author.id)
+    d = get_or_create_domain(user_id)
+    prod_h = barn_production_per_hour(d["barn_level"])
+    next_barn = building_upgrade_cost(d["barn_level"], 100_000)
+    next_barracks = building_upgrade_cost(d["barracks_level"], 120_000)
+    next_forge = building_upgrade_cost(d["forge_level"], 90_000)
 
-
-def get_recent_failures(limit: int = 5) -> list[dict[str, Any]]:
-    with get_conn() as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT command_name, timestamp_utc, user_id, hash_curto, error_text FROM failure_logs ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def ensure_world_state_row(conn: sqlite3.Connection) -> None:
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO world_state (
-            singleton_id,
-            epoca_atual,
-            decreto_ativo,
-            tensao_fronteiras,
-            faccao_ascensao,
-            atualizado_em
-        ) VALUES (1, ?, ?, ?, ?, ?)
-        """,
-        (
-            WORLD_STATE_DEFAULTS["epoca_atual"],
-            WORLD_STATE_DEFAULTS["decreto_ativo"],
-            WORLD_STATE_DEFAULTS["tensao_fronteiras"],
-            WORLD_STATE_DEFAULTS["faccao_ascensao"],
-            now,
-        ),
-    )
-
-
-def get_world_state() -> dict[str, Any]:
-    with get_conn() as conn:
-        conn.row_factory = sqlite3.Row
-        ensure_world_state_row(conn)
-        row = conn.execute("SELECT * FROM world_state WHERE singleton_id = 1").fetchone()
-        conn.commit()
-        if row:
-            return dict(row)
-    return {"singleton_id": 1, **WORLD_STATE_DEFAULTS, "atualizado_em": datetime.now(timezone.utc).isoformat()}
-
-
-def build_oraculo_message(world_state: dict[str, Any]) -> str:
-    tensao = str(world_state.get("tensao_fronteiras") or "MÉDIA").strip().upper()
-    if tensao not in TENSION_ORACLE_LINES:
-        tensao = "MÉDIA"
-
-    return (
-        f"**Época:** {world_state.get('epoca_atual', WORLD_STATE_DEFAULTS['epoca_atual'])}\n"
-        f"**Decreto ativo:** {world_state.get('decreto_ativo', WORLD_STATE_DEFAULTS['decreto_ativo'])}\n"
-        f"**Fronteiras:** {tensao}\n"
-        f"**Facção em ascensão:** {world_state.get('faccao_ascensao', WORLD_STATE_DEFAULTS['faccao_ascensao'])}\n\n"
-        f"{TENSION_ORACLE_LINES[tensao]}"
-    )
-
-
-def add_global_event(event_type: str, title: str, detail: str, actor_user_id: str | None = None) -> None:
-    with get_conn() as conn:
-        conn.execute(
-            """
-            INSERT INTO global_events (event_type, title, detail, actor_user_id, created_em)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (event_type, title, detail, actor_user_id, datetime.now(timezone.utc).isoformat()),
-        )
-        conn.commit()
-
-
-def get_global_events(limit: int = 20) -> list[dict[str, Any]]:
-    with get_conn() as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT event_type, title, detail, actor_user_id, created_em FROM global_events ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def week_key_utc() -> str:
-    now = datetime.now(timezone.utc)
-    year, week, _ = now.isocalendar()
-    return f"{year}-W{week:02d}"
-
-
-def close_stale_council_sessions(current_week_key: str) -> None:
-    with get_conn() as conn:
-        conn.row_factory = sqlite3.Row
-        stale = conn.execute(
-            "SELECT * FROM council_sessions WHERE status = 'open' AND week_key <> ?",
-            (current_week_key,),
-        ).fetchall()
-
-    for row in stale:
-        finalize_council_session(dict(row), actor_user_id="SYSTEM")
-
-
-def ensure_current_council_session(opened_by: str | None = None) -> dict[str, Any]:
-    wk = week_key_utc()
-    close_stale_council_sessions(wk)
-    now = datetime.now(timezone.utc).isoformat()
-    with get_conn() as conn:
-        conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM council_sessions WHERE week_key = ?", (wk,)).fetchone()
-        if row:
-            return dict(row)
-
-        conn.execute(
-            "INSERT INTO council_sessions (week_key, status, opened_by, opened_at) VALUES (?, 'open', ?, ?)",
-            (wk, opened_by, now),
-        )
-        conn.commit()
-        created = conn.execute("SELECT * FROM council_sessions WHERE week_key = ?", (wk,)).fetchone()
-        return dict(created) if created else {}
-
-
-def get_council_vote_counts(session_id: int) -> dict[str, int]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT option_key, COUNT(*) FROM council_votes WHERE session_id = ? GROUP BY option_key",
-            (session_id,),
-        ).fetchall()
-    counts = {k: 0 for k in COUNCIL_OPTIONS}
-    for option_key, qty in rows:
-        counts[str(option_key)] = int(qty)
-    return counts
-
-
-def register_council_vote(session_id: int, user_id: str, option_key: str) -> tuple[bool, str]:
-    if option_key not in COUNCIL_OPTIONS:
-        return False, "Opção de conselho inválida."
-
-    now = datetime.now(timezone.utc).isoformat()
-    with get_conn() as conn:
-        existing = conn.execute(
-            "SELECT 1 FROM council_votes WHERE session_id = ? AND user_id = ?",
-            (session_id, user_id),
-        ).fetchone()
-        if existing:
-            return False, "Teu voto nesta semana já foi registrado; o Conselho não aceita duplicatas."
-
-        conn.execute(
-            "INSERT INTO council_votes (session_id, user_id, option_key, created_at) VALUES (?, ?, ?, ?)",
-            (session_id, user_id, option_key, now),
-        )
-        conn.commit()
-    return True, COUNCIL_OPTIONS[option_key]["label"]
-
-
-def finalize_council_session(session: dict[str, Any], actor_user_id: str) -> tuple[bool, str]:
-    if not session or session.get("status") != "open":
-        return False, "Não há votação semanal aberta para encerrar."
-
-    session_id = int(session["id"])
-    counts = get_council_vote_counts(session_id)
-    winner_key = max(counts, key=lambda key: counts[key])
-    winner = COUNCIL_OPTIONS[winner_key]
-
-    with get_conn() as conn:
-        conn.execute(
-            "UPDATE council_sessions SET status = 'closed', closed_at = ?, winning_option = ? WHERE id = ?",
-            (datetime.now(timezone.utc).isoformat(), winner_key, session_id),
-        )
-        ensure_world_state_row(conn)
-        conn.execute(
-            "UPDATE world_state SET tensao_fronteiras = ?, faccao_ascensao = ?, atualizado_em = ? WHERE singleton_id = 1",
-            (winner["tensao"], winner["faccao"], datetime.now(timezone.utc).isoformat()),
-        )
-        conn.commit()
-
-    detail = f"Resultado semanal: {winner['label']} (tensão {winner['tensao']})."
-    add_global_event("conselho", "Resultado do Conselho", detail, actor_user_id=actor_user_id)
-    return True, detail
-
-
-def set_player_faction_alignment(user_id: str, faction_key: str) -> None:
-    now = datetime.now(timezone.utc).isoformat()
-    with get_conn() as conn:
-        conn.execute(
-            "UPDATE players SET faccao_alinhada = ?, faccao_alinhada_em = ? WHERE user_id = ?",
-            (faction_key, now, user_id),
-        )
-        conn.commit()
-
-
-def get_player_faction_points(user_id: str) -> dict[str, int]:
-    points = {key: 0 for key in FACTIONS}
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT faction_key, points FROM player_faction_reputation WHERE user_id = ?",
-            (user_id,),
-        ).fetchall()
-    for faction_key, value in rows:
-        if faction_key in points:
-            points[faction_key] = int(value)
-    return points
-
-
-def add_faction_reputation(user_id: str, faction_key: str, delta: int) -> int:
-    if faction_key not in FACTIONS:
-        raise ValueError("Facção inválida.")
-
-    now = datetime.now(timezone.utc).isoformat()
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT points FROM player_faction_reputation WHERE user_id = ? AND faction_key = ?",
-            (user_id, faction_key),
-        ).fetchone()
-        current = int(row[0]) if row else 0
-        updated = current + delta
-        conn.execute(
-            """
-            INSERT INTO player_faction_reputation (user_id, faction_key, points, updated_em)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id, faction_key) DO UPDATE SET
-                points = excluded.points,
-                updated_em = excluded.updated_em
-            """,
-            (user_id, faction_key, updated, now),
-        )
-        conn.commit()
-    return updated
-
-
-def reputation_label(points: int) -> str:
-    if points < -20:
-        return "Hostil"
-    if points < 0:
-        return "Suspeito"
-    if points < 30:
-        return "Tolerado"
-    if points < 70:
-        return "Honrado"
-    return "Consagrado"
-
-
-def get_db_diagnostics() -> dict[str, Any]:
-    db_exists = DB_PATH.exists()
-    data_dir_exists = DATA_DIR.exists()
-    writable = os.access(DATA_DIR, os.W_OK) if data_dir_exists else False
-
-    details: dict[str, Any] = {
-        "db_path": str(DB_PATH),
-        "db_exists": db_exists,
-        "data_dir_exists": data_dir_exists,
-        "data_dir_writable": writable,
-        "players_count": 0,
-        "failure_count": 0,
-        "world_tensao": "-",
-        "world_atualizado_em": "-",
-    }
-
-    if not db_exists:
-        return details
-
-    with get_conn() as conn:
-        details["players_count"] = conn.execute("SELECT COUNT(*) FROM players").fetchone()[0]
-        details["failure_count"] = conn.execute("SELECT COUNT(*) FROM failure_logs").fetchone()[0]
-        ensure_world_state_row(conn)
-        world = conn.execute("SELECT tensao_fronteiras, atualizado_em FROM world_state WHERE singleton_id = 1").fetchone()
-        conn.commit()
-
-    if world:
-        details["world_tensao"] = world[0]
-        details["world_atualizado_em"] = world[1]
-
-    return details
-
-
-def create_inkosi_record_if_needed(user_id: str) -> dict[str, Any]:
-    existing = get_player(user_id)
-    if existing:
-        return existing
-
-    create_player(
-        user_id=user_id,
-        classe_id="inkosi",
-        is_excecao=1,
-        nivel="ABSOLUTO",
-        forca="MAX",
-        resistencia="MAX",
-        agilidade="MAX",
-        inteligencia="MAX",
-        mana="MAX",
-        crescimento="Não mensurável pelas leis do Sistema.",
-        titulo="Aquele que Não se Submete",
-        lore_texto="Entidade anterior ao registro, posterior ao julgamento.",
-        pressagio="Quando seu nome é invocado, até os arquivos calam.",
-    )
-    return get_player(user_id) or {}
-
-
-# ============================================================
-# 5) DADOS CANÔNICOS
-# ============================================================
-CLASSES: dict[str, dict[str, Any]] = {
-    "guerreiro": {
-        "nome": "Guerreiro",
-        "icone": "⚔️",
-        "frase": "Onde a noite avança, ele ergue o aço e dita fronteiras.",
-        "descricao": "Guardião de muralhas e juramentos.",
-        "atributos": {"FOR": "12", "RES": "10", "AGI": "6", "INT": "4", "MAN": "3"},
-        "crescimento": "Cresce pelo rigor.",
-        "titulo": "Sentinela do Trono Velado",
-        "lore_texto": "Escolheu o aço para conter a ruína.",
-        "pressagio": "Seu passo anuncia ordem; seu silêncio, juízo.",
-    },
-    "mago": {
-        "nome": "Mago",
-        "icone": "🜂",
-        "frase": "Lê os ecos do invisível e escreve decretos no vazio.",
-        "descricao": "Erudito arcano do interdito.",
-        "atributos": {"FOR": "3", "RES": "5", "AGI": "6", "INT": "12", "MAN": "12"},
-        "crescimento": "Cresce pela contemplação proibida.",
-        "titulo": "Arcanista da Coroa Obscura",
-        "lore_texto": "Traduz o indizível para manter o Reino desperto.",
-        "pressagio": "Onde ele fixa os olhos, o véu cede.",
-    },
-    "cacador": {
-        "nome": "Caçador",
-        "icone": "🏹",
-        "frase": "Não persegue presas; persegue destinos.",
-        "descricao": "Predador de sombras.",
-        "atributos": {"FOR": "8", "RES": "7", "AGI": "11", "INT": "6", "MAN": "4"},
-        "crescimento": "Cresce na precisão ritual.",
-        "titulo": "Perseguidor dos Ecos",
-        "lore_texto": "Jurou caçar ameaças aos pactos antigos.",
-        "pressagio": "Quando a trilha some, ele já chegou.",
-    },
-    "soldado": {
-        "nome": "Soldado",
-        "icone": "🛡️",
-        "frase": "Marcha onde o medo manda recuar.",
-        "descricao": "Braço disciplinado do Império.",
-        "atributos": {"FOR": "9", "RES": "9", "AGI": "7", "INT": "6", "MAN": "3"},
-        "crescimento": "Cresce pela disciplina de ferro.",
-        "titulo": "Lâmina da Legião Eterna",
-        "lore_texto": "Nasceu para obedecer ao estandarte.",
-        "pressagio": "Onde seu estandarte fincar, a desordem se ajoelha.",
-    },
-    "explorador": {
-        "nome": "Explorador",
-        "icone": "🧭",
-        "frase": "Abre caminhos onde o mapa termina.",
-        "descricao": "Cartógrafo do desconhecido.",
-        "atributos": {"FOR": "6", "RES": "7", "AGI": "10", "INT": "8", "MAN": "5"},
-        "crescimento": "Cresce ao decifrar fronteiras perdidas.",
-        "titulo": "Arauto das Fronteiras Mortas",
-        "lore_texto": "Atravessa neblinas e nomeia o impossível.",
-        "pressagio": "Quando ele retorna, o mundo já não é o mesmo.",
-    },
-}
-
-JURAMENTOS: dict[str, str] = {
-    "trono": "Ao Trono Velado — Minha lâmina serve a ordem do Império.",
-    "verdade": "À Verdade Oculta — Meu espírito busca o que foi interditado.",
-    "fronteira": "À Fronteira Eterna — Meu passo protege o limite do mundo.",
-    "cinzas": "Às Cinzas da Queda — Minha memória vigia os erros antigos.",
-}
-
-TRILHAS: list[tuple[str, int]] = [
-    ("Iniciado", 0),
-    ("Reconhecido", 3),
-    ("Notável", 7),
-    ("Venerável", 12),
-    ("Lenda", 18),
-]
-
-WORLD_STATE_DEFAULTS: dict[str, str] = {
-    "epoca_atual": "Época das Brasas Veladas",
-    "decreto_ativo": "Decreto do Véu Silencioso",
-    "tensao_fronteiras": "MÉDIA",
-    "faccao_ascensao": "Casa das Lanternas (observada)",
-}
-
-TENSION_ORACLE_LINES: dict[str, str] = {
-    "BAIXA": "As muralhas respiram em paz vigiada; o Império acumula fôlego para o próximo ciclo.",
-    "MÉDIA": "As fronteiras vibram em alerta disciplinado; cada passo errado pode acender um novo decreto.",
-    "ALTA": "As fronteiras ardem sob aço e presságios; o Império exige vigilância absoluta dos despertos.",
-}
-
-COUNCIL_OPTIONS: dict[str, dict[str, str]] = {
-    "vigia": {"label": "Vigia das Fronteiras", "tensao": "ALTA", "faccao": "Legião da Vigília"},
-    "diplomacia": {"label": "Pacto de Diplomacia", "tensao": "BAIXA", "faccao": "Casa das Embaixadas"},
-    "equilibrio": {"label": "Trégua Calculada", "tensao": "MÉDIA", "faccao": "Ordem do Equilíbrio"},
-}
-
-INTRIGA_TYPES = {"rumor", "denuncia", "alianca", "ameaca"}
-
-FACTIONS: dict[str, str] = {
-    "legiao": "Legião da Vigília",
-    "embaixadas": "Casa das Embaixadas",
-    "equilibrio": "Ordem do Equilíbrio",
-    "lanternas": "Casa das Lanternas",
-}
-
-MANDATO_TYPES = {"acordo", "mediacao", "patrulha", "diplomacia", "protocolo"}
-POLITICAL_EVENT_TYPES_VISIBLE = {"decreto", "conselho", "intriga", "mandato"}
-
-
-def build_iniciar_embed() -> discord.Embed:
-    embed = discord.Embed(
-        title="RITUAL DO DESPERTAR",
-        description=(
-            "**Ato I — O Mundo**\n"
-            "No EBR, impérios se erguem sobre juramentos antigos e sombras disciplinadas.\n"
-            "Cada nome inscrito altera o peso da noite.\n\n"
-            "**Ato II — A Testemunha**\n"
-            "O Grimório observa teu passo, mede teu silêncio e recolhe teu primeiro voto.\n"
-            "Nada do que fores será esquecido.\n\n"
-            "**Ato III — A Escolha**\n"
-            "Diante dos selos, escolhe teu Caminho.\n"
-            "A escolha é única. O destino não admite rascunhos."
-        ),
-        color=EMBED_COLOR,
-    )
+    embed = discord.Embed(title="🏰 Domínio Imperial", color=discord.Color.dark_gold())
     embed.add_field(
-        name="Comece aqui",
-        value="1) Escolhe tua classe nos botões abaixo.\n2) Depois invoca `!perfil` para ler teu Registro.",
+        name="Recursos",
+        value=f"🪙 Ouro: **{d['gold']:,}**\n🏆 Prestígio: **{d['prestige']:,}**\n⚔️ Poder: **{d['power']:,}".replace(",", "."),
         inline=False,
     )
-    for data in CLASSES.values():
-        embed.add_field(name=f"{data['icone']} {data['nome']}", value=data["frase"], inline=False)
-
-    embed.set_footer(text="FASE 1 — Núcleo do Jogador • Escolha, sele e consulte `!perfil`")
-    return embed
-
-
-def normalize_class_input(raw: str) -> str:
-    aliases = {
-        "guerreiro": "guerreiro",
-        "mago": "mago",
-        "cacador": "cacador",
-        "caçador": "cacador",
-        "soldado": "soldado",
-        "explorador": "explorador",
-    }
-    return aliases.get(raw.strip().lower(), "")
-
-
-def register_class_for_user(user_id: str, classe_id: str) -> tuple[bool, str]:
-    if user_id == INKOSI_ID:
-        return False, "A assinatura ABSOLUTA não pode ser definida por escolha comum."
-
-    try:
-        if player_exists(user_id):
-            return False, "Teu destino já foi inscrito no Arquivo. Consulta `!perfil`. O Grimório não aceita duplicatas."
-
-        data = CLASSES[classe_id]
-        attrs = data["atributos"]
-        create_player(
-            user_id=user_id,
-            classe_id=classe_id,
-            is_excecao=0,
-            nivel="1",
-            forca=attrs["FOR"],
-            resistencia=attrs["RES"],
-            agilidade=attrs["AGI"],
-            inteligencia=attrs["INT"],
-            mana=attrs["MAN"],
-            crescimento=data["crescimento"],
-            titulo=data["titulo"],
-            lore_texto=data["lore_texto"],
-            pressagio=data["pressagio"],
-        )
-        try:
-            add_annal_entry(user_id, f"Ritual do Despertar concluído. Caminho selado: {data['nome']}.")
-            add_player_marco(user_id, "despertar", "Despertar concluído")
-        except sqlite3.Error:
-            logger.exception("Falha ao registrar entrada nos Anais; cadastro principal mantido")
-        return True, data["nome"]
-    except sqlite3.Error:
-        logger.exception("Falha SQLite ao registrar classe")
-        return False, "Falha temporária de persistência do Grimório. Tente novamente em alguns segundos."
-
-
-
-def parse_iso_datetime(raw: str | None) -> datetime | None:
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def get_trilha_status(player: dict[str, Any]) -> dict[str, Any]:
-    criado_em = parse_iso_datetime(player.get("criado_em"))
-    agora = datetime.now(timezone.utc)
-    dias_desde_despertar = max((agora - criado_em).days, 0) if criado_em else 0
-    annals_count = get_player_annals_count(str(player.get("user_id", "")))
-    prestigio = int(player.get("prestigio") or 0)
-
-    score = annals_count + (dias_desde_despertar // 7) + (prestigio // 10)
-
-    atual_nome = TRILHAS[0][0]
-    proximo_nome: str | None = None
-    progresso_atual = score
-    progresso_necessario = TRILHAS[1][1] if len(TRILHAS) > 1 else TRILHAS[0][1]
-
-    for i, (nome, requisito) in enumerate(TRILHAS):
-        if score >= requisito:
-            atual_nome = nome
-            progresso_atual = score - requisito
-            if i + 1 < len(TRILHAS):
-                proximo_nome = TRILHAS[i + 1][0]
-                progresso_necessario = TRILHAS[i + 1][1] - requisito
-            else:
-                proximo_nome = None
-                progresso_necessario = 0
-
-    return {
-        "atual": atual_nome,
-        "proximo": proximo_nome,
-        "score": score,
-        "annals": annals_count,
-        "dias": dias_desde_despertar,
-        "prestigio": prestigio,
-        "progresso_atual": progresso_atual,
-        "progresso_necessario": progresso_necessario,
-    }
-
-
-def set_player_juramento(user_id: str, juramento_key: str) -> None:
-    agora = datetime.now(timezone.utc).isoformat()
-    with get_conn() as conn:
-        conn.execute(
-            "UPDATE players SET juramento = ?, juramento_escolhido_em = ? WHERE user_id = ?",
-            (juramento_key, agora, user_id),
-        )
-        conn.commit()
-
-
-def can_change_juramento(player: dict[str, Any], cooldown_days: int = 30) -> tuple[bool, int]:
-    escolhido_em = parse_iso_datetime(player.get("juramento_escolhido_em"))
-    if not escolhido_em:
-        return True, 0
-
-    agora = datetime.now(timezone.utc)
-    liberacao = escolhido_em + timedelta(days=cooldown_days)
-    restante = liberacao - agora
-    if restante.total_seconds() <= 0:
-        return True, 0
-
-    dias_restantes = max(restante.days + (1 if restante.seconds > 0 else 0), 1)
-    return False, dias_restantes
-
-
-# ============================================================
-# 6) UI
-# ============================================================
-class ClasseView(discord.ui.View):
-    def __init__(self, author_id: int, timeout: float = 180.0):
-        super().__init__(timeout=timeout)
-        self.author_id = author_id
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("As runas rejeitam tua mão. Apenas o invocador pode selar este rito.", ephemeral=True)
-            return False
-        return True
-
-    async def escolher(self, interaction: discord.Interaction, classe_id: str) -> None:
-        try:
-            user_id = str(interaction.user.id)
-            if user_id == INKOSI_ID:
-                await interaction.response.send_message("A assinatura ABSOLUTA não nasce por escolha ritual. O Arquivo não admite este vínculo.", ephemeral=True)
-                return
-            if player_exists(user_id):
-                await interaction.response.send_message("Teu destino já foi inscrito no Arquivo. Consulta `!perfil`.", ephemeral=True)
-                return
-
-            data = CLASSES[classe_id]
-            a = data["atributos"]
-            create_player(
-                user_id=user_id,
-                classe_id=classe_id,
-                is_excecao=0,
-                nivel="1",
-                forca=a["FOR"],
-                resistencia=a["RES"],
-                agilidade=a["AGI"],
-                inteligencia=a["INT"],
-                mana=a["MAN"],
-                crescimento=data["crescimento"],
-                titulo=data["titulo"],
-                lore_texto=data["lore_texto"],
-                pressagio=data["pressagio"],
-            )
-            for child in self.children:
-                if isinstance(child, discord.ui.Button):
-                    child.disabled = True
-
-            await interaction.response.edit_message(view=self)
-            await interaction.followup.send(f"Rito selado: **{data['nome']}**.")
-        except Exception as exc:
-            logger.exception("Falha em botão de classe")
-            uid = str(interaction.user.id if interaction.user else "0")
-            seal = "SEM_SELO"
-            try:
-                seal = log_failure("BTN", uid, str(exc))
-            except Exception:
-                logger.exception("Falha ao registrar selo BTN")
-            mensagem = f"{VOICE['erro']} Selo de falha: BTN-{seal}."
-            if interaction.response.is_done():
-                await interaction.followup.send(mensagem, ephemeral=True)
-            else:
-                await interaction.response.send_message(mensagem, ephemeral=True)
-
-    @discord.ui.button(label="Guerreiro", style=discord.ButtonStyle.danger)
-    async def b1(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        del button
-        await self.escolher(interaction, "guerreiro")
-
-    @discord.ui.button(label="Mago", style=discord.ButtonStyle.primary)
-    async def b2(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        del button
-        await self.escolher(interaction, "mago")
-
-    @discord.ui.button(label="Caçador", style=discord.ButtonStyle.secondary)
-    async def b3(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        del button
-        await self.escolher(interaction, "cacador")
-
-    @discord.ui.button(label="Soldado", style=discord.ButtonStyle.success)
-    async def b4(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        del button
-        await self.escolher(interaction, "soldado")
-
-    @discord.ui.button(label="Explorador", style=discord.ButtonStyle.secondary)
-    async def b5(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        del button
-        await self.escolher(interaction, "explorador")
-
-
-# ============================================================
-# 7) COMANDOS (FASE 1 + FASE 2)
-# ============================================================
-@bot.command(name="iniciar")
-async def iniciar(ctx: commands.Context) -> None:
-    try:
-        user_id = str(ctx.author.id)
-
-        if user_id == INKOSI_ID:
-            try:
-                create_inkosi_record_if_needed(user_id)
-            except sqlite3.Error:
-                logger.exception("Falha SQLite no registro Inkosi; tentando auto-reparo")
-                init_db()
-                try:
-                    create_inkosi_record_if_needed(user_id)
-                except sqlite3.Error as exc2:
-                    logger.exception("Falha persistente no registro Inkosi")
-                    await send_grimoire_error(
-                        ctx,
-                        "iniciar.inkosi",
-                        command_name="iniciar",
-                        user_id=user_id,
-                        error=exc2,
-                    )
-                    await ctx.send(canon_line("recusa", "O trono oculto recusou o selo neste instante. Tenta novamente em alguns segundos."))
-                    return
-
-            embed = discord.Embed(
-                title="REGISTRO IMPOSSÍVEL DETECTADO",
-                description=canon_line("abertura", "O Sistema tentou classificar a assinatura e aceitou apenas: **ABSOLUTO**."),
-                color=discord.Color.dark_red(),
-            )
-            embed.add_field(name="Designação", value="Aquele que Não se Submete", inline=False)
-            embed.add_field(name="Classificação", value="Não Indexável", inline=False)
-            embed.set_footer(text="FASE 1 — Núcleo do Jogador • Exceção canônica")
-            await ctx.send(embed=embed)
-            return
-
-        if player_exists(user_id):
-            await ctx.send(canon_line("recusa", "Teu Registro já repousa no Grimório. As runas recomendam: `!perfil`."))
-            return
-
-        embed = build_iniciar_embed()
-        try:
-            await ctx.send(embed=embed, view=ClasseView(author_id=ctx.author.id))
-        except Exception as view_exc:
-            logger.exception("Falha ao enviar painel de classes; usando fallback textual")
-            try:
-                await ctx.send(embed=embed)
-                await ctx.send(canon_line("recusa", "Painel ritual indisponível. O Arquivo orienta: `!classe <guerreiro|mago|cacador|soldado|explorador>`."))
-            except Exception:
-                logger.exception("Fallback textual do !iniciar também falhou")
-                raise view_exc
-    except Exception as exc:
-        logger.exception("Falha no comando !iniciar")
-        await send_grimoire_error(ctx, "iniciar", command_name="iniciar", user_id=str(ctx.author.id), error=exc)
-
-
-@bot.command(name="classe")
-async def classe(ctx: commands.Context, *, classe_id: str | None = None) -> None:
-    try:
-        if not classe_id:
-            await ctx.send(canon_line("recusa", "As runas exigem o rito completo: `!classe <guerreiro|mago|cacador|soldado|explorador>`."))
-            return
-
-        user_id = str(ctx.author.id)
-        cid = normalize_class_input(classe_id)
-        if not cid or cid not in CLASSES:
-            await ctx.send(canon_line("recusa", "O Arquivo não reconhece essa classe."))
-            return
-
-        ok, result = register_class_for_user(user_id, cid)
-        if not ok:
-            await ctx.send(canon_line("recusa", result))
-            return
-
-        data = CLASSES[cid]
-        embed = discord.Embed(
-            title="RITUAL CONCLUÍDO",
-            description=canon_line("sucesso", f"**{ctx.author.display_name}** foi inscrito como **{result}**. O Arquivo aguarda tua leitura em `!perfil`."),
-            color=EMBED_COLOR,
-        )
-        embed.add_field(name="Título", value=data["titulo"], inline=False)
-        embed.set_footer(text="FASE 1 — Núcleo do Jogador • Juramento selado")
-        await ctx.send(embed=embed)
-    except Exception as exc:
-        logger.exception("Falha no comando !classe")
-        await send_grimoire_error(ctx, "classe", command_name="classe", user_id=str(ctx.author.id), error=exc)
-
-
-def normalize_juramento_input(raw: str) -> str:
-    aliases = {
-        "trono": "trono",
-        "ao trono": "trono",
-        "verdade": "verdade",
-        "verdade oculta": "verdade",
-        "fronteira": "fronteira",
-        "a fronteira": "fronteira",
-        "cinzas": "cinzas",
-        "as cinzas": "cinzas",
-    }
-    return aliases.get(raw.strip().lower(), "")
-
-
-@bot.command(name="juramento")
-async def juramento(ctx: commands.Context, *, escolha: str | None = None) -> None:
-    try:
-        user_id = str(ctx.author.id)
-        player = await get_registered_player_or_reply(
-            ctx,
-            user_id,
-            not_found_text="Nenhum registro foi encontrado. Invoque `!iniciar` primeiro.",
-        )
-        if not player:
-            return
-
-        if int(player.get("is_excecao", 0)) == 1:
-            await ctx.send(canon_line("recusa", "A assinatura ABSOLUTA não se curva a juramentos comuns."))
-            return
-
-        if not escolha:
-            opcoes = options_bulleted_text(JURAMENTOS)
-            await ctx.send(canon_line("abertura", f"Selos canônicos disponíveis:\n{opcoes}\n\nUso: `!juramento <opção>`."))
-            return
-
-        juramento_key = normalize_juramento_input(escolha)
-        if juramento_key not in JURAMENTOS:
-            await ctx.send(canon_line("recusa", "Juramento inválido. Use `!juramento` para listar os selos canônicos."))
-            return
-
-        atual = str(player.get("juramento") or "").strip().lower()
-        if atual == juramento_key:
-            await ctx.send(canon_line("recusa", "Este juramento já está selado em teu nome."))
-            return
-
-        if atual:
-            permitido, dias_restantes = can_change_juramento(player, cooldown_days=30)
-            if not permitido:
-                await ctx.send(canon_line("recusa", f"Teu voto ainda ecoa. Nova troca disponível em aproximadamente {dias_restantes} dia(s)."))
-                return
-
-        set_player_juramento(user_id, juramento_key)
-        add_player_marco(user_id, "juramento_selado", "Juramento selado")
-        add_annal_entry(user_id, f"Juramento selado: {JURAMENTOS[juramento_key]}")
-        await ctx.send(canon_line("sucesso", f"Juramento inscrito: **{JURAMENTOS[juramento_key]}**"))
-    except Exception as exc:
-        logger.exception("Falha no comando !juramento")
-        await send_grimoire_error(ctx, "juramento", command_name="juramento", user_id=str(ctx.author.id), error=exc)
-
-
-@bot.command(name="trilha")
-async def trilha(ctx: commands.Context) -> None:
-    try:
-        user_id = str(ctx.author.id)
-        player = await get_registered_player_or_reply(
-            ctx,
-            user_id,
-            not_found_text="Nenhum registro foi encontrado. Invoque `!iniciar`.",
-        )
-        if not player:
-            return
-
-        status = get_trilha_status(player)
-        if status["proximo"]:
-            progresso = f"{status['progresso_atual']}/{status['progresso_necessario']}"
-            proximo = f"**Próximo degrau:** {status['proximo']} ({progresso})"
-        else:
-            proximo = "**Próximo degrau:** nenhum — tua trilha já alcançou o ápice."
-
-        await ctx.send(
-            canon_line(
-                "abertura",
-                (
-                    f"**Posição narrativa:** {status['atual']}\n"
-                    f"{proximo}\n"
-                    f"Critérios atuais: registros `{status['annals']}`, dias desde despertar `{status['dias']}`, prestígio `{status['prestigio']}`."
-                ),
-            )
-        )
-    except Exception as exc:
-        logger.exception("Falha no comando !trilha")
-        await send_grimoire_error(ctx, "trilha", command_name="trilha", user_id=str(ctx.author.id), error=exc)
-
-
-@bot.command(name="legado")
-async def legado(ctx: commands.Context) -> None:
-    try:
-        user_id = str(ctx.author.id)
-        player = await get_registered_player_or_reply(
-            ctx,
-            user_id,
-            not_found_text="Nenhum registro foi encontrado. Invoque `!iniciar`.",
-        )
-        if not player:
-            return
-
-        marcos = get_player_marcos(user_id)
-        if not marcos:
-            await ctx.send(canon_line("abertura", "Teu legado ainda está em branco. Nenhum marco histórico foi selado."))
-            return
-
-        linhas = [f"• {m['descricao']} (`{m['criado_em'][:10]}`)" for m in marcos[:10]]
-        await ctx.send(canon_line("abertura", "**Marcas históricas:**\n" + "\n".join(linhas)))
-    except Exception as exc:
-        logger.exception("Falha no comando !legado")
-        await send_grimoire_error(ctx, "legado", command_name="legado", user_id=str(ctx.author.id), error=exc)
-
-
-@bot.command(name="oraculo")
-async def oraculo(ctx: commands.Context) -> None:
-    try:
-        world_state = get_world_state()
-        embed = discord.Embed(
-            title="ORÁCULO IMPERIAL",
-            description=build_oraculo_message(world_state),
-            color=EMBED_COLOR,
-        )
-        embed.set_footer(text="Etapa 2 — Estado do Mundo")
-        await ctx.send(embed=embed)
-    except Exception as exc:
-        logger.exception("Falha no comando !oraculo")
-        await send_grimoire_error(ctx, "oraculo", command_name="oraculo", user_id=str(ctx.author.id), error=exc)
-
-
-@bot.command(name="conselho")
-async def conselho(ctx: commands.Context, *, escolha: str | None = None) -> None:
-    try:
-        session = ensure_current_council_session(opened_by=str(ctx.author.id))
-        if not session:
-            await ctx.send(canon_line("erro", "O Conselho não pôde ser convocado."))
-            return
-
-        if not escolha:
-            counts = get_council_vote_counts(int(session["id"]))
-            opcoes = "\n".join(
-                f"• `{key}` — {meta['label']} ({counts.get(key, 0)} voto(s))"
-                for key, meta in COUNCIL_OPTIONS.items()
-            )
-            await ctx.send(
-                canon_line(
-                    "abertura",
-                    f"Conselho semanal `{session['week_key']}` aberto.\n{opcoes}\n\nVote com `!conselho <opção>`.",
-                )
-            )
-            return
-
-        escolha_norm = escolha.strip().lower()
-        if escolha_norm == "encerrar":
-            if not ctx.author.guild_permissions.administrator:
-                await ctx.send(canon_line("recusa", "As runas de autoridade barram teu intento. Somente administradores encerram o Conselho semanal."))
-                return
-            ok, msg = finalize_council_session(session, actor_user_id=str(ctx.author.id))
-            await ctx.send(canon_line("sucesso" if ok else "recusa", msg))
-            return
-
-        ok, result = register_council_vote(int(session["id"]), str(ctx.author.id), escolha_norm)
-        await ctx.send(canon_line("sucesso" if ok else "recusa", result if not ok else f"Voto selado em **{result}**."))
-    except Exception as exc:
-        logger.exception("Falha no comando !conselho")
-        await send_grimoire_error(ctx, "conselho", command_name="conselho", user_id=str(ctx.author.id), error=exc)
-
-
-@bot.command(name="decreto")
-@commands.has_permissions(administrator=True)
-async def decreto(ctx: commands.Context, *, texto: str) -> None:
-    try:
-        conteudo = texto.strip()
-        if len(conteudo) < 5:
-            await ctx.send(canon_line("recusa", "Informe um decreto mais completo (mínimo de 5 caracteres)."))
-            return
-
-        now = datetime.now(timezone.utc).isoformat()
-        with get_conn() as conn:
-            ensure_world_state_row(conn)
-            conn.execute(
-                "UPDATE world_state SET decreto_ativo = ?, atualizado_em = ? WHERE singleton_id = 1",
-                (conteudo, now),
-            )
-            conn.commit()
-
-        add_global_event("decreto", "Decreto Imperial", conteudo, actor_user_id=str(ctx.author.id))
-        await ctx.send(canon_line("sucesso", f"Novo decreto selado:\n**{conteudo}**"))
-    except Exception as exc:
-        logger.exception("Falha no comando !decreto")
-        await send_grimoire_error(ctx, "decreto", command_name="decreto", user_id=str(ctx.author.id), error=exc)
-
-
-@decreto.error
-async def decreto_error(ctx: commands.Context, error: commands.CommandError) -> None:
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send(canon_line("recusa", "As runas de autoridade barram teu intento. Somente administradores decretam a vontade imperial."))
-    elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(canon_line("recusa", "As runas exigem o rito completo: `!decreto <texto>`."))
-    else:
-        logger.exception("Erro não tratado em !decreto", exc_info=error)
-        await send_grimoire_error(ctx, "decreto.error", command_name="decreto.error", user_id=str(ctx.author.id), error=error)
-
-
-@bot.command(name="intriga")
-async def intriga(ctx: commands.Context, *, linha: str | None = None) -> None:
-    try:
-        if not linha:
-            await ctx.send(canon_line("recusa", "As runas exigem o rito completo: `!intriga <rumor|denuncia|alianca|ameaca> <texto>`."))
-            return
-
-        parsed = parse_typed_line(linha, INTRIGA_TYPES)
-        if not parsed:
-            await ctx.send(canon_line("recusa", "Formato inválido. Exemplo: `!intriga rumor Tropas vistas no norte`."))
-            return
-
-        tipo, texto = parsed
-
-        titulo = f"Intriga — {tipo.title()}"
-        add_global_event("intriga", titulo, texto, actor_user_id=str(ctx.author.id))
-        await ctx.send(canon_line("sucesso", f"Intriga registrada nos Anais Globais como **{tipo}**."))
-    except Exception as exc:
-        logger.exception("Falha no comando !intriga")
-        await send_grimoire_error(ctx, "intriga", command_name="intriga", user_id=str(ctx.author.id), error=exc)
-
-
-@bot.command(name="anaisglobal")
-async def anaisglobal(ctx: commands.Context) -> None:
-    try:
-        eventos = get_global_events(limit=15)
-        if not eventos:
-            await ctx.send(canon_line("abertura", "Os Anais Globais ainda não receberam decretos, conselhos, intrigas ou mandatos."))
-            return
-
-        linhas = [
-            f"`{e['created_em'][:10]}` • **{e['event_type'].upper()}** • {e['title']}\n{(e['detail'] or '').strip()}"
-            for e in eventos
-            if e["event_type"] in POLITICAL_EVENT_TYPES_VISIBLE
-        ]
-        if not linhas:
-            await ctx.send(canon_line("abertura", "Nenhum evento político disponível nos Anais Globais."))
-            return
-
-        await ctx.send(canon_line("abertura", "**Anais Globais do Império**\n" + "\n\n".join(linhas[:10])))
-    except Exception as exc:
-        logger.exception("Falha no comando !anaisglobal")
-        await send_grimoire_error(ctx, "anaisglobal", command_name="anaisglobal", user_id=str(ctx.author.id), error=exc)
-
-
-@bot.command(name="alinhar")
-async def alinhar(ctx: commands.Context, *, faccao: str | None = None) -> None:
-    try:
-        user_id = str(ctx.author.id)
-        player = await get_registered_player_or_reply(
-            ctx,
-            user_id,
-            not_found_text="Nenhum registro foi encontrado. Invoque `!iniciar` primeiro.",
-        )
-        if not player:
-            return
-
-        if not faccao:
-            opcoes = options_bulleted_text(FACTIONS)
-            await ctx.send(canon_line("abertura", f"Facções disponíveis:\n{opcoes}\n\nUso: `!alinhar <faccao>`."))
-            return
-
-        key = faccao.strip().lower()
-        if key not in FACTIONS:
-            await ctx.send(canon_line("recusa", "O Arquivo não reconhece essa facção. Invoca `!alinhar` para ler os selos válidos."))
-            return
-
-        atual = str(player.get("faccao_alinhada") or "").strip().lower()
-        if atual:
-            await ctx.send(canon_line("recusa", f"Teu alinhamento já foi selado em **{FACTIONS.get(atual, atual)}**."))
-            return
-
-        set_player_faction_alignment(user_id, key)
-        add_faction_reputation(user_id, key, 10)
-        add_global_event(
-            "alinhamento",
-            "Alinhamento de Facção",
-            f"{ctx.author.display_name} alinhou-se à {FACTIONS[key]}.",
-            actor_user_id=user_id,
-        )
-        await ctx.send(canon_line("sucesso", f"Alinhamento firmado com **{FACTIONS[key]}**."))
-    except Exception as exc:
-        logger.exception("Falha no comando !alinhar")
-        await send_grimoire_error(ctx, "alinhar", command_name="alinhar", user_id=str(ctx.author.id), error=exc)
-
-
-@bot.command(name="reputacao")
-async def reputacao(ctx: commands.Context) -> None:
-    try:
-        user_id = str(ctx.author.id)
-        player = await get_registered_player_or_reply(
-            ctx,
-            user_id,
-            not_found_text="Nenhum registro foi encontrado. Invoque `!iniciar`.",
-        )
-        if not player:
-            return
-
-        points = get_player_faction_points(user_id)
-        linhas = [f"• **{nome}**: {reputation_label(points[chave])} ({points[chave]} pts)" for chave, nome in FACTIONS.items()]
-        await ctx.send(canon_line("abertura", "**Reputação entre facções**\n" + "\n".join(linhas)))
-    except Exception as exc:
-        logger.exception("Falha no comando !reputacao")
-        await send_grimoire_error(ctx, "reputacao", command_name="reputacao", user_id=str(ctx.author.id), error=exc)
-
-
-@bot.command(name="mandato")
-async def mandato(ctx: commands.Context, *, linha: str | None = None) -> None:
-    try:
-        user_id = str(ctx.author.id)
-        player = await get_registered_player_or_reply(
-            ctx,
-            user_id,
-            not_found_text="Nenhum registro foi encontrado. Invoque `!iniciar`.",
-        )
-        if not player:
-            return
-
-        if not linha:
-            tipos = "|".join(sorted(MANDATO_TYPES))
-            await ctx.send(canon_line("recusa", f"Uso: `!mandato <{tipos}> <descrição social>`."))
-            return
-
-        parsed = parse_typed_line(linha, MANDATO_TYPES)
-        if not parsed:
-            await ctx.send(canon_line("recusa", "Formato inválido. Exemplo: `!mandato mediacao Trégua firmada na fronteira leste`."))
-            return
-
-        tipo, descricao = parsed
-        faccao = str(player.get("faccao_alinhada") or "").strip().lower()
-        alvo = faccao if faccao in FACTIONS else "equilibrio"
-        novo_total = add_faction_reputation(user_id, alvo, 8)
-        detalhe = f"{ctx.author.display_name} executou mandato social ({tipo}): {descricao}"
-        add_global_event("mandato", "Mandato Social", detalhe, actor_user_id=user_id)
-        add_annal_entry(user_id, f"Mandato social ({tipo}) registrado: {descricao}")
-        await ctx.send(canon_line("sucesso", f"Mandato registrado. Reputação em **{FACTIONS[alvo]}** agora é {novo_total} ({reputation_label(novo_total)})."))
-    except Exception as exc:
-        logger.exception("Falha no comando !mandato")
-        await send_grimoire_error(ctx, "mandato", command_name="mandato", user_id=str(ctx.author.id), error=exc)
-
-
-@bot.command(name="perfil")
-async def perfil(ctx: commands.Context) -> None:
-    try:
-        user_id = str(ctx.author.id)
-        player = await get_registered_player_or_reply(
-            ctx,
-            user_id,
-            not_found_text="Nenhum registro foi encontrado. Invoque `!iniciar`.",
-            include_inkosi_exception=True,
-        )
-        if not player:
-            return
-
-        if int(player.get("is_excecao", 0)) == 1:
-            embed = discord.Embed(
-                title="REGISTRO ABSOLUTO",
-                description="Os arquivos tentaram ordenar esta presença e foram reduzidos ao silêncio.",
-                color=discord.Color.dark_red(),
-            )
-            embed.add_field(name="Designação", value="Aquele que Não se Submete", inline=False)
-            embed.add_field(name="Classificação", value="Não Indexável", inline=False)
-            embed.add_field(name="Essência", value="**FOR:** MAX | **RES:** MAX | **AGI:** MAX | **INT:** MAX | **MAN:** MAX", inline=False)
-            embed.set_footer(text="FASE 1 — Núcleo do Jogador • Registro canônico")
-            await ctx.send(embed=embed)
-            return
-
-        classe_id = str(player.get("classe") or "desconhecido")
-        classe_nome = CLASSES.get(classe_id, {}).get("nome", classe_id.title())
-        titulo = str(player.get("titulo") or "— não registrado")
-        pressagio = str(player.get("pressagio") or "— não registrado")
-        juramento_key = str(player.get("juramento") or "").strip().lower()
-        juramento_texto = JURAMENTOS.get(juramento_key, "— não selado")
-        trilha = get_trilha_status(player)
-        faccao_key = str(player.get("faccao_alinhada") or "").strip().lower()
-        faccao_texto = FACTIONS.get(faccao_key, "— não selado")
-        reputacoes = get_player_faction_points(user_id)
-        reputacao_faccao = reputation_label(reputacoes.get(faccao_key, 0)) if faccao_key in reputacoes else "— não registrado"
-        legado = get_player_marcos(user_id)
-        legado_texto = legado[-1]["descricao"] if legado else "— não registrado"
-        criado_em = str(player.get("criado_em") or "")
-        registro_data = criado_em[:10] if criado_em else "— não registrado"
-        selo_registro = short_hash("registro", str(player.get("criado_em") or ""), user_id)
-
-        embed = discord.Embed(title="GRIMÓRIO DO DESTINO", description=canon_line("abertura"), color=EMBED_COLOR)
-        embed.add_field(
-            name="Identidade",
-            value=(
-                f"**Nome:** {ctx.author.display_name}\n"
-                f"**Classe:** {classe_nome}\n"
-                f"**Título:** {titulo}\n"
-                f"**Presságio:** {pressagio}"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="Atributos",
-            value=(
-                f"**FOR:** {player.get('forca', '—')} | **RES:** {player.get('resistencia', '—')}\n"
-                f"**AGI:** {player.get('agilidade', '—')} | **INT:** {player.get('inteligencia', '—')}\n"
-                f"**MAN:** {player.get('mana', '—')}"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="Registro",
-            value=f"**Data de inscrição:** {registro_data}\n**Selo canônico:** `{selo_registro}`",
-            inline=False,
-        )
-        embed.add_field(name="Juramento", value=juramento_texto, inline=True)
-        embed.add_field(name="Trilha", value=trilha.get("atual", "— não registrado"), inline=True)
-        embed.add_field(name="Facção", value=faccao_texto, inline=True)
-        embed.add_field(name="Reputação", value=reputacao_faccao, inline=True)
-        embed.add_field(name="Legado recente", value=legado_texto, inline=True)
-        embed.add_field(name="Crescimento", value=str(player.get("crescimento") or "— não registrado"), inline=True)
-        embed.add_field(name="Caminho Escolhido", value=str(player.get("lore_texto") or "— não registrado"), inline=False)
-        embed.set_footer(text="FASE 1 — Núcleo do Jogador • Registro canônico")
-        await ctx.send(embed=embed)
-    except Exception as exc:
-        logger.exception("Falha no comando !perfil")
-        await send_grimoire_error(ctx, "perfil", command_name="perfil", user_id=str(ctx.author.id), error=exc)
-
-
-@bot.command(name="resetar")
-@commands.has_permissions(administrator=True)
-async def resetar(ctx: commands.Context, membro: discord.Member) -> None:
-    try:
-        alvo_id = str(membro.id)
-        if not player_exists(alvo_id):
-            await ctx.send(canon_line("recusa", f"Nenhum selo ativo foi encontrado para **{membro.display_name}**."))
-            return
-
-        delete_player(alvo_id)
-        if alvo_id == INKOSI_ID:
-            await ctx.send("⚠️ **REVOGAÇÃO IMPOSSÍVEL, MAS EXECUTADA**\nAté mesmo o Registro Absoluto foi removido por decreto administrativo.")
-            return
-
-        await ctx.send(canon_line("sucesso", f"Revogação do Registro executada para **{membro.display_name}**."))
-    except Exception as exc:
-        logger.exception("Falha no comando !resetar")
-        await send_grimoire_error(ctx, "resetar", command_name="resetar", user_id=str(ctx.author.id), error=exc)
-
-
-@resetar.error
-async def resetar_error(ctx: commands.Context, error: commands.CommandError) -> None:
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send(canon_line("recusa", "As runas de autoridade barram teu intento. Somente administradores decretam a Revogação do Registro."))
-    elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(canon_line("recusa", "As runas exigem o rito completo: `!resetar @membro`"))
-    else:
-        logger.exception("Erro não tratado em !resetar", exc_info=error)
-        await send_grimoire_error(ctx, "resetar.error", command_name="resetar.error", user_id=str(ctx.author.id), error=error)
-
-
-@bot.command(name="eu")
-async def eu(ctx: commands.Context) -> None:
-    await ctx.send("Sou o Grimório de EBR: registro destinos, não promessas.")
-
-
-@bot.command(name="changelog")
-async def changelog(ctx: commands.Context) -> None:
-    embed = discord.Embed(title="Changelog — Núcleo do Jogador", color=EMBED_COLOR)
-    embed.description = """**Etapa 4 — Facções vivas**
-• `!alinhar <faccao>` sela a facção principal do jogador
-• `!reputacao` mostra Hostil/Suspeito/Tolerado/Honrado/Consagrado por facção
-• `!mandato` concede reputação social e registra evento nos Anais"""
-    embed.set_footer(text="EBR • Base estável")
+    embed.add_field(
+        name="Estruturas",
+        value=(
+            f"🌾 Celeiros T{d['barn_level']} (produção {prod_h:,}/h)\n"
+            f"🛡️ Casernas T{d['barracks_level']}\n"
+            f"🔨 Forja T{d['forge_level']}"
+        ).replace(",", "."),
+        inline=False,
+    )
+    embed.add_field(
+        name="Militar",
+        value=f"👥 Tropas: **{d['troops']:,}**".replace(",", "."),
+        inline=False,
+    )
+    embed.add_field(
+        name="Próximos upgrades",
+        value=(
+            f"`!melhorar celeiros` → {next_barn:,} ouro\n"
+            f"`!melhorar casernas` → {next_barracks:,} ouro\n"
+            f"`!melhorar forja` → {next_forge:,} ouro"
+        ).replace(",", "."),
+        inline=False,
+    )
+    embed.set_footer(text="Ações: !coletar • !treinar • !melhorar <celeiros|casernas|forja> • !rank")
     await ctx.send(embed=embed)
 
 
+@bot.command(name="coletar")
+async def coletar(ctx: commands.Context) -> None:
+    user_id = str(ctx.author.id)
+    d = get_or_create_domain(user_id)
+    now = now_ts()
+    elapsed = max(0, min(now - d["last_collect_ts"], COLLECT_CAP_SECONDS))
+    gold_gain = int(barn_production_per_hour(d["barn_level"]) * (elapsed / 3600))
+
+    new_gold = d["gold"] + gold_gain
+    update_domain(user_id, gold=new_gold, last_collect_ts=now)
+
+    await ctx.send(
+        f"✅ Coleta concluída.\n"
+        f"Δ Ouro: +{gold_gain:,}\n"
+        f"Saldo: {new_gold:,}\n"
+        f"Próximo: `!melhorar celeiros` ou `!treinar`".replace(",", ".")
+    )
+
+
+@bot.command(name="treinar")
+async def treinar(ctx: commands.Context) -> None:
+    user_id = str(ctx.author.id)
+    d = get_or_create_domain(user_id)
+    now = now_ts()
+    delta = now - d["last_train_ts"]
+    if delta < TRAIN_COOLDOWN_SECONDS:
+        rest = TRAIN_COOLDOWN_SECONDS - delta
+        minutes = max(1, rest // 60)
+        await ctx.send(f"⏳ Casernas em cooldown. Tenta novamente em {minutes} min.")
+        return
+
+    troops_gain = barracks_train_amount(d["barracks_level"])
+    new_troops = d["troops"] + troops_gain
+    new_power = recalc_power(new_troops, d["barracks_level"], d["forge_level"])
+    update_domain(user_id, troops=new_troops, power=new_power, last_train_ts=now)
+
+    await ctx.send(
+        f"✅ Treino concluído.\n"
+        f"Δ Tropas: +{troops_gain:,}\n"
+        f"⚔️ Poder atual: {new_power:,}\n"
+        f"Próximo: `!rank` ou `!melhorar casernas`".replace(",", ".")
+    )
+
+
+@bot.command(name="melhorar")
+async def melhorar(ctx: commands.Context, estrutura: str | None = None) -> None:
+    if not estrutura:
+        await ctx.send("Uso: `!melhorar <celeiros|casernas|forja>`")
+        return
+
+    estrutura = estrutura.strip().lower()
+    if estrutura not in {"celeiros", "casernas", "forja"}:
+        await ctx.send("Estrutura inválida. Use: `celeiros`, `casernas` ou `forja`.")
+        return
+
+    user_id = str(ctx.author.id)
+    d = get_or_create_domain(user_id)
+
+    if estrutura == "celeiros":
+        level_key, base = "barn_level", 100_000
+    elif estrutura == "casernas":
+        level_key, base = "barracks_level", 120_000
+    else:
+        level_key, base = "forge_level", 90_000
+
+    level = d[level_key]
+    cost = building_upgrade_cost(level, base)
+    if d["gold"] < cost:
+        await ctx.send(f"❌ Ouro insuficiente. Falta {(cost - d['gold']):,}.".replace(",", "."))
+        return
+
+    new_level = level + 1
+    fields = {"gold": d["gold"] - cost, level_key: new_level}
+    if estrutura == "casernas" or estrutura == "forja":
+        fields["power"] = recalc_power(d["troops"], new_level if estrutura == "casernas" else d["barracks_level"], new_level if estrutura == "forja" else d["forge_level"])
+    update_domain(user_id, **fields)
+
+    await ctx.send(
+        f"✅ Upgrade concluído: **{estrutura} T{new_level}**.\n"
+        f"Δ Ouro: -{cost:,}\n"
+        f"Próximo: `!dominio` para ver o impacto.".replace(",", ".")
+    )
+
+
+@bot.command(name="rank")
+async def rank(ctx: commands.Context) -> None:
+    with get_conn() as conn:
+        rich = conn.execute("SELECT user_id, gold FROM domains ORDER BY gold DESC LIMIT 5").fetchall()
+        war = conn.execute("SELECT user_id, power FROM domains ORDER BY power DESC LIMIT 5").fetchall()
+        prest = conn.execute("SELECT user_id, prestige FROM domains ORDER BY prestige DESC LIMIT 5").fetchall()
+
+    def fmt(rows: list[sqlite3.Row], metric: str) -> str:
+        if not rows:
+            return "Sem dados."
+        out = []
+        for i, r in enumerate(rows, start=1):
+            out.append(f"{i}. <@{r['user_id']}> — {r[metric]:,}".replace(",", "."))
+        return "\n".join(out)
+
+    embed = discord.Embed(title="🏛️ Rankings Imperiais", color=discord.Color.blurple())
+    embed.add_field(name="Magnatas (Ouro)", value=fmt(rich, "gold"), inline=False)
+    embed.add_field(name="Senhores de Guerra (Poder)", value=fmt(war, "power"), inline=False)
+    embed.add_field(name="Lendas (Prestígio)", value=fmt(prest, "prestige"), inline=False)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="guia")
+async def guia(ctx: commands.Context) -> None:
+    await ctx.send(
+        "**Núcleo C ativo (estrutura limpa).**\n"
+        "Comandos atuais: `!dominio`, `!coletar`, `!treinar`, `!melhorar`, `!rank`, `!diagnostico`, `!guia`.\n"
+        "Loop: Coletar → Melhorar → Treinar → Rank."
+    )
 
 
 @bot.command(name="diagnostico")
 @commands.has_permissions(administrator=True)
 async def diagnostico(ctx: commands.Context) -> None:
-    try:
-        info = get_db_diagnostics()
-        failures = get_recent_failures(limit=5)
+    with get_conn() as conn:
+        players = conn.execute("SELECT COUNT(*) c FROM domains").fetchone()["c"]
 
-        embed = discord.Embed(
-            title="DIAGNÓSTICO DO GRIMÓRIO",
-            description="Painel técnico para investigar selos de falha recentes.",
-            color=EMBED_COLOR,
-        )
-        embed.add_field(
-            name="Banco SQLite",
-            value=(
-                f"**Path:** `{info['db_path']}`\n"
-                f"**Arquivo existe:** {info['db_exists']}\n"
-                f"**Diretório existe:** {info['data_dir_exists']}\n"
-                f"**Diretório gravável:** {info['data_dir_writable']}"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="Contadores",
-            value=(
-                f"**Players:** {info['players_count']}\n"
-                f"**Falhas registradas:** {info['failure_count']}"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="Feature Flags",
-            value=(
-                f"**NUCLEO_C_ENABLED:** {FEATURE_FLAGS['NUCLEO_C_ENABLED']}"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="Estado do Mundo",
-            value=(
-                f"**Tensão nas fronteiras:** {info['world_tensao']}\n"
-                f"**Última atualização:** {str(info['world_atualizado_em'])[:19]}"
-            ),
-            inline=False,
-        )
+    await ctx.send(
+        f"Diagnóstico:\n"
+        f"DB: `{DB_PATH}`\n"
+        f"Domínios: {players}\n"
+        f"Estrutura: Núcleo C limpa (sem comandos legados)."
+    )
 
-        if failures:
-            lines = []
-            for row in failures:
-                lines.append(
-                    f"`{row['timestamp_utc'][:19]}` • `{row['command_name']}` • `{row['hash_curto']}` • uid `{row['user_id']}`"
-                )
-            embed.add_field(name="Últimos selos", value="\n".join(lines[:5]), inline=False)
-
-        embed.set_footer(text="Etapa 4 • Facções vivas")
-        await ctx.send(embed=embed)
-    except Exception as exc:
-        logger.exception("Falha no comando !diagnostico")
-        await send_grimoire_error(ctx, "diagnostico", command_name="diagnostico", user_id=str(ctx.author.id), error=exc)
 
 @diagnostico.error
 async def diagnostico_error(ctx: commands.Context, error: commands.CommandError) -> None:
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send(canon_line("recusa", "As runas de autoridade barram teu intento. `!diagnostico` é um selo administrativo."))
-    else:
-        logger.exception("Erro não tratado em !diagnostico", exc_info=error)
-        await send_grimoire_error(ctx, "diagnostico.error", command_name="diagnostico.error", user_id=str(ctx.author.id), error=error)
-
-@bot.command(name="guia")
-async def guia(ctx: commands.Context) -> None:
-    embed = discord.Embed(
-        title="Guia do Grimório — EBR",
-        description="Orientação oficial para tua primeira semana no Arquivo Imperial.",
-        color=EMBED_COLOR,
-    )
-    embed.add_field(name="Comece aqui", value="1) `!iniciar`\n2) `!perfil`", inline=False)
-    embed.add_field(
-        name="Depois disso…",
-        value=(
-            "O mundo permanece estável até as fases do Núcleo C serem ativadas. "
-            f"Flag atual: `NUCLEO_C_ENABLED={FEATURE_FLAGS['NUCLEO_C_ENABLED']}`."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Comandos de jogador",
-        value="`!iniciar` • `!classe` • `!perfil` • `!juramento` • `!trilha` • `!legado` • `!oraculo` • `!conselho` • `!intriga` • `!anaisglobal` • `!alinhar` • `!reputacao` • `!mandato` • `!eu` • `!changelog` • `!guia`",
-        inline=False,
-    )
-    embed.add_field(name="Comandos administrativos", value="`!resetar @membro` • `!decreto <texto>` • `!diagnostico`", inline=False)
-    embed.set_footer(text="EBR • As runas lembram: teu próximo passo é `!perfil`.")
-    await ctx.send(embed=embed)
-
-
-# ============================================================
-# 8) EVENTOS
-# ============================================================
+        await ctx.send("❌ Apenas administradores podem usar `!diagnostico`.")
+        return
+    logger.exception("Erro em !diagnostico", exc_info=error)
+    await ctx.send("Erro interno no diagnóstico.")
 
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
     if isinstance(error, commands.CommandNotFound):
         return
+    logger.exception("Erro de comando", exc_info=error)
+    await ctx.send("Erro interno ao executar comando.")
 
-    logger.exception("Erro global de comando: %s", error)
-    await send_grimoire_error(
-        ctx,
-        "global",
-        command_name=(ctx.command.qualified_name if ctx.command else "global"),
-        user_id=str(ctx.author.id if ctx.author else "0"),
-        error=error,
-    )
 
 @bot.event
 async def on_ready() -> None:
-    logger.info("Bot conectado como %s (%s)", bot.user, bot.user.id if bot.user else "?")
-    logger.info("Feature flags ativas: NUCLEO_C_ENABLED=%s", FEATURE_FLAGS["NUCLEO_C_ENABLED"])
+    logger.info("Conectado como %s", bot.user)
 
 
-# ============================================================
-# 9) MAIN/RUN
-# ============================================================
 def main() -> None:
-    try:
-        init_db()
-    except Exception:
-        logger.exception("Falha ao inicializar banco")
-        raise
-
-    try:
-        token = resolve_token()
-    except RuntimeError as exc:
-        logger.error("Inicialização abortada: %s", exc)
-        raise SystemExit(1) from exc
-
-    try:
-        bot.run(token)
-    except discord.LoginFailure:
-        logger.error("Falha de autenticação Discord (token inválido).")
-        raise SystemExit(1)
+    init_db()
+    if not TOKEN:
+        raise SystemExit("Defina DISCORD_TOKEN no ambiente.")
+    bot.run(TOKEN)
 
 
 if __name__ == "__main__":
