@@ -106,6 +106,20 @@ def parse_typed_line(raw: str | None, allowed_types: set[str]) -> tuple[str, str
     return event_type, detail
 
 
+async def get_registered_player_or_reply(
+    ctx: commands.Context,
+    user_id: str,
+    *,
+    not_found_text: str,
+    include_inkosi_exception: bool = False,
+) -> dict[str, Any] | None:
+    player = create_inkosi_record_if_needed(user_id) if include_inkosi_exception and user_id == INKOSI_ID else get_player(user_id)
+    if not player:
+        await ctx.send(canon_line("recusa", not_found_text))
+        return None
+    return player
+
+
 def log_failure(command_name: str, user_id: str, error_text: str) -> str:
     ts = datetime.now(timezone.utc).isoformat()
     seal = short_hash(command_name, ts, user_id)
@@ -831,6 +845,7 @@ FACTIONS: dict[str, str] = {
 }
 
 MANDATO_TYPES = {"acordo", "mediacao", "patrulha", "diplomacia", "protocolo"}
+POLITICAL_EVENT_TYPES_VISIBLE = {"decreto", "conselho", "intriga", "mandato"}
 
 
 def build_iniciar_embed() -> discord.Embed:
@@ -1171,9 +1186,12 @@ def normalize_juramento_input(raw: str) -> str:
 async def juramento(ctx: commands.Context, *, escolha: str | None = None) -> None:
     try:
         user_id = str(ctx.author.id)
-        player = get_player(user_id)
+        player = await get_registered_player_or_reply(
+            ctx,
+            user_id,
+            not_found_text="Nenhum registro foi encontrado. Invoque `!iniciar` primeiro.",
+        )
         if not player:
-            await ctx.send(canon_line("recusa", "Nenhum registro foi encontrado. Invoque `!iniciar` primeiro."))
             return
 
         if int(player.get("is_excecao", 0)) == 1:
@@ -1214,9 +1232,12 @@ async def juramento(ctx: commands.Context, *, escolha: str | None = None) -> Non
 async def trilha(ctx: commands.Context) -> None:
     try:
         user_id = str(ctx.author.id)
-        player = get_player(user_id)
+        player = await get_registered_player_or_reply(
+            ctx,
+            user_id,
+            not_found_text="Nenhum registro foi encontrado. Invoque `!iniciar`.",
+        )
         if not player:
-            await ctx.send(canon_line("recusa", "Nenhum registro foi encontrado. Invoque `!iniciar`."))
             return
 
         status = get_trilha_status(player)
@@ -1245,9 +1266,12 @@ async def trilha(ctx: commands.Context) -> None:
 async def legado(ctx: commands.Context) -> None:
     try:
         user_id = str(ctx.author.id)
-        player = get_player(user_id)
+        player = await get_registered_player_or_reply(
+            ctx,
+            user_id,
+            not_found_text="Nenhum registro foi encontrado. Invoque `!iniciar`.",
+        )
         if not player:
-            await ctx.send(canon_line("recusa", "Nenhum registro foi encontrado. Invoque `!iniciar`."))
             return
 
         marcos = get_player_marcos(user_id)
@@ -1385,7 +1409,7 @@ async def anaisglobal(ctx: commands.Context) -> None:
         linhas = [
             f"`{e['created_em'][:10]}` • **{e['event_type'].upper()}** • {e['title']}\n{(e['detail'] or '').strip()}"
             for e in eventos
-            if e["event_type"] in {"decreto", "conselho", "intriga", "mandato"}
+            if e["event_type"] in POLITICAL_EVENT_TYPES_VISIBLE
         ]
         if not linhas:
             await ctx.send(canon_line("abertura", "Nenhum evento político disponível nos Anais Globais."))
@@ -1401,9 +1425,12 @@ async def anaisglobal(ctx: commands.Context) -> None:
 async def alinhar(ctx: commands.Context, *, faccao: str | None = None) -> None:
     try:
         user_id = str(ctx.author.id)
-        player = get_player(user_id)
+        player = await get_registered_player_or_reply(
+            ctx,
+            user_id,
+            not_found_text="Nenhum registro foi encontrado. Invoque `!iniciar` primeiro.",
+        )
         if not player:
-            await ctx.send(canon_line("recusa", "Nenhum registro foi encontrado. Invoque `!iniciar` primeiro."))
             return
 
         if not faccao:
@@ -1439,9 +1466,12 @@ async def alinhar(ctx: commands.Context, *, faccao: str | None = None) -> None:
 async def reputacao(ctx: commands.Context) -> None:
     try:
         user_id = str(ctx.author.id)
-        player = get_player(user_id)
+        player = await get_registered_player_or_reply(
+            ctx,
+            user_id,
+            not_found_text="Nenhum registro foi encontrado. Invoque `!iniciar`.",
+        )
         if not player:
-            await ctx.send(canon_line("recusa", "Nenhum registro foi encontrado. Invoque `!iniciar`."))
             return
 
         points = get_player_faction_points(user_id)
@@ -1456,9 +1486,12 @@ async def reputacao(ctx: commands.Context) -> None:
 async def mandato(ctx: commands.Context, *, linha: str | None = None) -> None:
     try:
         user_id = str(ctx.author.id)
-        player = get_player(user_id)
+        player = await get_registered_player_or_reply(
+            ctx,
+            user_id,
+            not_found_text="Nenhum registro foi encontrado. Invoque `!iniciar`.",
+        )
         if not player:
-            await ctx.send(canon_line("recusa", "Nenhum registro foi encontrado. Invoque `!iniciar`."))
             return
 
         if not linha:
@@ -1488,10 +1521,13 @@ async def mandato(ctx: commands.Context, *, linha: str | None = None) -> None:
 async def perfil(ctx: commands.Context) -> None:
     try:
         user_id = str(ctx.author.id)
-        player = create_inkosi_record_if_needed(user_id) if user_id == INKOSI_ID else get_player(user_id)
-
+        player = await get_registered_player_or_reply(
+            ctx,
+            user_id,
+            not_found_text="Nenhum registro foi encontrado. Invoque `!iniciar`.",
+            include_inkosi_exception=True,
+        )
         if not player:
-            await ctx.send(canon_line("recusa", "Nenhum registro foi encontrado. Invoque `!iniciar`."))
             return
 
         if int(player.get("is_excecao", 0)) == 1:
