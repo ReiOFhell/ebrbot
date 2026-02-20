@@ -894,7 +894,7 @@ def register_class_for_user(user_id: str, classe_id: str) -> tuple[bool, str]:
 
     try:
         if player_exists(user_id):
-            return False, "Teu destino já foi inscrito. O Grimório não aceita duplicatas."
+            return False, "Teu destino já foi inscrito no Arquivo. Consulta `!perfil`. O Grimório não aceita duplicatas."
 
         data = CLASSES[classe_id]
         attrs = data["atributos"]
@@ -1006,7 +1006,7 @@ class ClasseView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
-            await interaction.response.send_message("Apenas o invocador pode selar este rito.", ephemeral=True)
+            await interaction.response.send_message("As runas rejeitam tua mão. Apenas o invocador pode selar este rito.", ephemeral=True)
             return False
         return True
 
@@ -1014,10 +1014,10 @@ class ClasseView(discord.ui.View):
         try:
             user_id = str(interaction.user.id)
             if user_id == INKOSI_ID:
-                await interaction.response.send_message("A assinatura ABSOLUTA não nasce por escolha ritual.", ephemeral=True)
+                await interaction.response.send_message("A assinatura ABSOLUTA não nasce por escolha ritual. O Arquivo não admite este vínculo.", ephemeral=True)
                 return
             if player_exists(user_id):
-                await interaction.response.send_message("Teu destino já foi inscrito.", ephemeral=True)
+                await interaction.response.send_message("Teu destino já foi inscrito no Arquivo. Consulta `!perfil`.", ephemeral=True)
                 return
 
             data = CLASSES[classe_id]
@@ -1133,7 +1133,7 @@ async def iniciar(ctx: commands.Context) -> None:
             logger.exception("Falha ao enviar painel de classes; usando fallback textual")
             try:
                 await ctx.send(embed=embed)
-                await ctx.send(canon_line("recusa", "Painel ritual indisponível. Usa `!classe <guerreiro|mago|cacador|soldado|explorador>`."))
+                await ctx.send(canon_line("recusa", "Painel ritual indisponível. O Arquivo orienta: `!classe <guerreiro|mago|cacador|soldado|explorador>`."))
             except Exception:
                 logger.exception("Fallback textual do !iniciar também falhou")
                 raise view_exc
@@ -1146,13 +1146,13 @@ async def iniciar(ctx: commands.Context) -> None:
 async def classe(ctx: commands.Context, *, classe_id: str | None = None) -> None:
     try:
         if not classe_id:
-            await ctx.send(canon_line("recusa", "Uso: `!classe <guerreiro|mago|cacador|soldado|explorador>`."))
+            await ctx.send(canon_line("recusa", "As runas exigem o rito completo: `!classe <guerreiro|mago|cacador|soldado|explorador>`."))
             return
 
         user_id = str(ctx.author.id)
         cid = normalize_class_input(classe_id)
         if not cid or cid not in CLASSES:
-            await ctx.send(canon_line("recusa", "Classe inválida."))
+            await ctx.send(canon_line("recusa", "O Arquivo não reconhece essa classe."))
             return
 
         ok, result = register_class_for_user(user_id, cid)
@@ -1333,7 +1333,7 @@ async def conselho(ctx: commands.Context, *, escolha: str | None = None) -> None
         escolha_norm = escolha.strip().lower()
         if escolha_norm == "encerrar":
             if not ctx.author.guild_permissions.administrator:
-                await ctx.send(canon_line("recusa", "Somente administradores podem encerrar o Conselho semanal."))
+                await ctx.send(canon_line("recusa", "As runas de autoridade barram teu intento. Somente administradores encerram o Conselho semanal."))
                 return
             ok, msg = finalize_council_session(session, actor_user_id=str(ctx.author.id))
             await ctx.send(canon_line("sucesso" if ok else "recusa", msg))
@@ -1374,9 +1374,9 @@ async def decreto(ctx: commands.Context, *, texto: str) -> None:
 @decreto.error
 async def decreto_error(ctx: commands.Context, error: commands.CommandError) -> None:
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send(canon_line("recusa", "Somente administradores podem decretar a vontade imperial."))
+        await ctx.send(canon_line("recusa", "As runas de autoridade barram teu intento. Somente administradores decretam a vontade imperial."))
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(canon_line("recusa", "Uso: `!decreto <texto>`."))
+        await ctx.send(canon_line("recusa", "As runas exigem o rito completo: `!decreto <texto>`."))
     else:
         logger.exception("Erro não tratado em !decreto", exc_info=error)
         await send_grimoire_error(ctx, "decreto.error", command_name="decreto.error", user_id=str(ctx.author.id), error=error)
@@ -1386,7 +1386,7 @@ async def decreto_error(ctx: commands.Context, error: commands.CommandError) -> 
 async def intriga(ctx: commands.Context, *, linha: str | None = None) -> None:
     try:
         if not linha:
-            await ctx.send(canon_line("recusa", "Uso: `!intriga <rumor|denuncia|alianca|ameaca> <texto>`."))
+            await ctx.send(canon_line("recusa", "As runas exigem o rito completo: `!intriga <rumor|denuncia|alianca|ameaca> <texto>`."))
             return
 
         parsed = parse_typed_line(linha, INTRIGA_TYPES)
@@ -1446,7 +1446,7 @@ async def alinhar(ctx: commands.Context, *, faccao: str | None = None) -> None:
 
         key = faccao.strip().lower()
         if key not in FACTIONS:
-            await ctx.send(canon_line("recusa", "Facção inválida. Use `!alinhar` para listar as opções."))
+            await ctx.send(canon_line("recusa", "O Arquivo não reconhece essa facção. Invoca `!alinhar` para ler os selos válidos."))
             return
 
         atual = str(player.get("faccao_alinhada") or "").strip().lower()
@@ -1630,7 +1630,7 @@ async def resetar_error(ctx: commands.Context, error: commands.CommandError) -> 
     if isinstance(error, commands.MissingPermissions):
         await ctx.send(canon_line("recusa", "As runas de autoridade barram teu intento. Somente administradores decretam a Revogação do Registro."))
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(canon_line("recusa", "Uso correto: `!resetar @membro`"))
+        await ctx.send(canon_line("recusa", "As runas exigem o rito completo: `!resetar @membro`"))
     else:
         logger.exception("Erro não tratado em !resetar", exc_info=error)
         await send_grimoire_error(ctx, "resetar.error", command_name="resetar.error", user_id=str(ctx.author.id), error=error)
