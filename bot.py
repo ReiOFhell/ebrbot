@@ -52,6 +52,17 @@ VOICE = {
 }
 
 
+def env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "sim"}
+
+FEATURE_FLAGS = {
+    "NUCLEO_C_ENABLED": env_flag("NUCLEO_C_ENABLED", default=False),
+}
+
+
 # ============================================================
 # 4) BANCO (SQLITE HELPERS + MIGRAÇÕES)
 # ============================================================
@@ -1685,6 +1696,13 @@ async def diagnostico(ctx: commands.Context) -> None:
             inline=False,
         )
         embed.add_field(
+            name="Feature Flags",
+            value=(
+                f"**NUCLEO_C_ENABLED:** {FEATURE_FLAGS['NUCLEO_C_ENABLED']}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
             name="Estado do Mundo",
             value=(
                 f"**Tensão nas fronteiras:** {info['world_tensao']}\n"
@@ -1725,7 +1743,10 @@ async def guia(ctx: commands.Context) -> None:
     embed.add_field(name="Comece aqui", value="1) `!iniciar`\n2) `!perfil`", inline=False)
     embed.add_field(
         name="Depois disso…",
-        value="O mundo permanece congelado na Fase 1 para consolidar identidade, registro e leitura de destino.",
+        value=(
+            "O mundo permanece estável até as fases do Núcleo C serem ativadas. "
+            f"Flag atual: `NUCLEO_C_ENABLED={FEATURE_FLAGS['NUCLEO_C_ENABLED']}`."
+        ),
         inline=False,
     )
     embed.add_field(
@@ -1760,6 +1781,7 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
 @bot.event
 async def on_ready() -> None:
     logger.info("Bot conectado como %s (%s)", bot.user, bot.user.id if bot.user else "?")
+    logger.info("Feature flags ativas: NUCLEO_C_ENABLED=%s", FEATURE_FLAGS["NUCLEO_C_ENABLED"])
 
 
 # ============================================================
