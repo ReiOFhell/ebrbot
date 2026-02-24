@@ -482,6 +482,39 @@ def do_train(user_id: str) -> str:
     ).replace(",", ".")
 
 
+def do_upgrade(user_id: str, estrutura: str) -> str:
+    if estrutura not in {"celeiros", "casernas", "forja"}:
+        return "❌ Upgrade indisponível\nΔ Estrutura inválida\nPróximo: escolha celeiros, casernas ou forja"
+
+    d = get_or_create_domain(user_id)
+    level_key = {"celeiros": "barn_level", "casernas": "barracks_level", "forja": "forge_level"}[estrutura]
+    level = d[level_key]
+    if level >= MAX_BUILDING_TIER:
+        return f"❌ Upgrade indisponível\nΔ {estrutura.title()} já está no T{MAX_BUILDING_TIER}\nPróximo: melhore outra construção"
+
+    cost = building_upgrade_cost(level, estrutura)
+    if d["gold"] < cost:
+        falta = cost - d["gold"]
+        return f"❌ Upgrade indisponível\nΔ Ouro insuficiente (falta {falta:,})\nPróximo: clique em **Resgatar**".replace(",", ".")
+
+    new_level = level + 1
+    params = {"gold": d["gold"] - cost, level_key: new_level}
+    if estrutura in {"casernas", "forja"}:
+        barracks_level = new_level if estrutura == "casernas" else d["barracks_level"]
+        forge_level = new_level if estrutura == "forja" else d["forge_level"]
+        with get_conn() as conn:
+            g_bonus, s_bonus = get_slot_bonuses(conn, d["general_id"], d["strategist_id"])
+        params["power"] = recalc_power(d["troops"], barracks_level, forge_level, d["doctrine"], g_bonus, s_bonus)
+
+    update_player_state(user_id, **params)
+    upgrade_secs = building_upgrade_time_seconds(new_level)
+    return (
+        f"✅ Upgrade concluído ({estrutura.title()} T{new_level})\n"
+        f"Δ Ouro: -{cost:,} | Tempo ref: {upgrade_secs // 60} min\n"
+        "Próximo: continue em Construções ou volte ao Domínio"
+    ).replace(",", ".")
+
+
 def build_rank_embed() -> discord.Embed:
     with get_conn() as conn:
         rich = conn.execute(
@@ -552,7 +585,7 @@ def build_dominio_embed(user_id: str) -> discord.Embed:
     return embed
 
 
-def build_construcoes_embed(user_id: str) -> discord.Embed:
+def build_construcoes_embed(user_id: str, notice: str | None = None) -> discord.Embed:
     d = get_or_create_domain(user_id)
 
     def next_cost(kind: str, level: int) -> str:
@@ -568,6 +601,8 @@ def build_construcoes_embed(user_id: str) -> discord.Embed:
         "Use `!melhorar <celeiros|casernas|forja>` para upgrade."
     )
     embed.set_footer(text="Botão voltar retorna ao painel principal")
+    if notice:
+        embed.add_field(name="Ação", value=notice, inline=False)
     embed.add_field(
         name="Fluxo",
         value=(
@@ -595,6 +630,49 @@ class ConstrucoesView(discord.ui.View):
     async def btn_voltar(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         embed = build_dominio_embed(str(interaction.user.id))
         await interaction.response.edit_message(embed=embed, view=DominioView(author_id=interaction.user.id))
+
+    @discord.ui.button(label="🛠️ Melhorar", style=discord.ButtonStyle.success)
+    async def btn_melhorar(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=build_construcoes_embed(str(interaction.user.id)),
+            view=ConstrucoesUpgradeView(author_id=interaction.user.id),
+        )
+
+
+class UpgradeSelect(discord.ui.Select):
+    def __init__(self) -> None:
+        options = [
+            discord.SelectOption(label="Celeiros", value="celeiros", description="Melhora economia por hora"),
+            discord.SelectOption(label="Casernas", value="casernas", description="Melhora treino militar"),
+            discord.SelectOption(label="Forja", value="forja", description="Melhora achados e bônus"),
+        ]
+        super().__init__(placeholder="Escolha a construção para melhorar", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        estrutura = self.values[0]
+        msg = do_upgrade(str(interaction.user.id), estrutura)
+        embed = build_construcoes_embed(str(interaction.user.id), notice=msg)
+        await interaction.response.edit_message(embed=embed, view=ConstrucoesUpgradeView(author_id=interaction.user.id))
+
+
+class ConstrucoesUpgradeView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=180)
+        self.author_id = author_id
+        self.add_item(UpgradeSelect())
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Apenas o dono do painel pode usar estes botões.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="⬅️ Voltar", style=discord.ButtonStyle.primary)
+    async def btn_back(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=build_construcoes_embed(str(interaction.user.id)),
+            view=ConstrucoesView(author_id=interaction.user.id),
+        )
 
 
 class DominioView(discord.ui.View):
@@ -735,45 +813,7 @@ async def melhorar(ctx: commands.Context, estrutura: str | None = None) -> None:
     if not estrutura:
         await ctx.send("Uso: `!melhorar <celeiros|casernas|forja>`")
         return
-
-    estrutura = estrutura.strip().lower()
-    if estrutura not in {"celeiros", "casernas", "forja"}:
-        await ctx.send("Estrutura inválida. Use: `celeiros`, `casernas` ou `forja`.")
-        return
-
-    user_id = str(ctx.author.id)
-    d = get_or_create_domain(user_id)
-
-    level_key = {"celeiros": "barn_level", "casernas": "barracks_level", "forja": "forge_level"}[estrutura]
-    level = d[level_key]
-    if level >= MAX_BUILDING_TIER:
-        await ctx.send(f"❌ {estrutura.title()} já está no nível máximo (T{MAX_BUILDING_TIER}).")
-        return
-    cost = building_upgrade_cost(level, estrutura)
-    if d["gold"] < cost:
-        await ctx.send(f"❌ Ouro insuficiente. Falta {(cost - d['gold']):,}.".replace(",", "."))
-        return
-
-    new_level = level + 1
-    params = {"gold": d["gold"] - cost, level_key: new_level}
-    if estrutura in {"casernas", "forja"}:
-        barracks_level = new_level if estrutura == "casernas" else d["barracks_level"]
-        forge_level = new_level if estrutura == "forja" else d["forge_level"]
-        with get_conn() as conn:
-            g_bonus, s_bonus = get_slot_bonuses(conn, d["general_id"], d["strategist_id"])
-        params["power"] = recalc_power(d["troops"], barracks_level, forge_level, d["doctrine"], g_bonus, s_bonus)
-
-    update_player_state(user_id, **params)
-    upgrade_secs = building_upgrade_time_seconds(new_level)
-
-    await ctx.send(
-        (
-            f"✅ Upgrade concluído: **{estrutura} T{new_level}**.\n"
-            f"Δ Ouro: -{cost:,}\n"
-            f"⏱️ Referência de tempo (tier alvo): {upgrade_secs // 60} min\n"
-            "Próximo: `!dominio` para ver o impacto."
-        ).replace(",", ".")
-    )
+    await ctx.send(do_upgrade(str(ctx.author.id), estrutura.strip().lower()))
 
 
 @bot.command(name="doutrina")
