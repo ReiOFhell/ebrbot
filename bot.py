@@ -4,6 +4,7 @@ import random
 import sqlite3
 import time
 from pathlib import Path
+import sys
 
 import discord
 from discord.ext import commands
@@ -1545,6 +1546,36 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
     cmd_name = ctx.command.qualified_name if ctx.command else "desconhecido"
     log_command_error(str(ctx.author.id), cmd_name, error)
     await ctx.send(f"<@{ctx.author.id}> Erro interno ao executar comando.")
+
+
+@bot.event
+async def on_error(event_method: str, *args: object, **kwargs: object) -> None:
+    exc = sys.exc_info()[1]
+    error = exc if isinstance(exc, Exception) else RuntimeError(f"Erro não tratado em {event_method}")
+
+    if event_method == "on_interaction" and args and isinstance(args[0], discord.Interaction):
+        interaction = args[0]
+        user_id = str(interaction.user.id) if interaction.user else None
+        log_command_error(user_id, "interaction:on_interaction", error)
+        logger.exception("Erro não tratado em interação Discord UI", exc_info=error)
+
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "❌ Falha interna ao processar interação. Use `!diagnostico` (admin).",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "❌ Falha interna ao processar interação. Use `!diagnostico` (admin).",
+                    ephemeral=True,
+                )
+        except Exception:
+            logger.exception("Falha ao enviar retorno de erro da interação")
+        return
+
+    logger.exception("Erro não tratado em evento Discord: %s", event_method, exc_info=error)
+
 
 
 @bot.event
