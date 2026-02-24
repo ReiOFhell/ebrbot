@@ -27,6 +27,7 @@ class GameplayService:
     get_slot_bonuses: Callable[[sqlite3.Connection, int | None, int | None], tuple[float, float]]
     has_strategist_gate: Callable[[sqlite3.Row, sqlite3.Connection], tuple[bool, str]]
     now_ts: Callable[[], int]
+    resolve_discovery: Callable[[str, str, int], str]
 
     def do_collect(self, user_id: str) -> str:
         d = self.get_or_create_domain(user_id)
@@ -212,9 +213,7 @@ class GameplayService:
             )
             conn.commit()
 
-        relic_line = "Nenhum achado relevante."
-        if d["forge_level"] >= 4 and random.random() <= min(0.20, 0.04 + d["forge_level"] * 0.01):
-            relic_line = "Achado: fragmento relicário encontrado na incursão."
+        relic_line = self.resolve_discovery(user_id, f"operacao:{op['key']}", d["forge_level"])
 
         return (
             f"🧪 Simulação `{op['title']}`\n"

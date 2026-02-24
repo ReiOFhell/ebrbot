@@ -23,3 +23,11 @@ Implementação aplicada no núcleo do bot com foco em clareza:
 ## Observações técnicas
 - Limite de edifícios em T10 aplicado no comando `!melhorar`.
 - `!dominio` mostra o estado das 3 estruturas e do núcleo militar.
+
+## Sistema de Achados & Relíquias (sub-lore emergente)
+- A lore não aparece no `!guia`; ela surge por descoberta em `!forjar` e nas operações.
+- Camadas de achado implementadas por raridade:
+  - **Fragmento (comum)**: pista curta + registro em anais.
+  - **Relíquia (raro)**: item com micro-lore e impacto prático.
+  - **Entidade (lendário)**: classes de raridade altas (`SS`, `SSS`, `SSS+`, `99999`) com registro dramático.
+- Registros persistidos em `discoveries_log` e inventário (`inventories`) com comando `!anais` (oculto) para auditoria narrativa.

@@ -201,6 +201,22 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS discoveries_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                item_id INTEGER,
+                rarity TEXT NOT NULL,
+                fragment_text TEXT NOT NULL,
+                impact_text TEXT NOT NULL,
+                created_at_ts INTEGER NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES domains(user_id),
+                FOREIGN KEY(item_id) REFERENCES items(id)
+            )
+            """
+        )
         # 7) temporada
         conn.execute(
             """
@@ -251,6 +267,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_strategists_user ON strategists(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_panel_events_user ON panel_events(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_panel_events_name ON panel_events(event_name)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_discoveries_user ON discoveries_log(user_id)")
 
         # seeds mínimos
         conn.execute(
@@ -268,7 +285,11 @@ def init_db() -> None:
             VALUES
             ('pergaminho_rasgado_i', 'Pergaminho Rasgado I', 'C', 'O Trono não respondeu.'),
             ('elmo_basalto', 'Elmo do Basalto', 'R', 'Usado quando a muralha ainda respirava.'),
-            ('cronica_heroi_sem_tumulo', 'Crônica do Herói Sem Túmulo', 'L', 'Salvou o mundo e perdeu o nome.')
+            ('cronica_heroi_sem_tumulo', 'Crônica do Herói Sem Túmulo', 'L', 'Salvou o mundo e perdeu o nome.'),
+            ('selo_legiao_ss', 'Selo Quebrado da Legião', 'SS', 'Um juramento que ainda sangra no metal.'),
+            ('estandarte_sss', 'Estandarte da Vigília Ausente', 'SSS', 'Quando caiu, ninguém ousou recolher.'),
+            ('lamina_sssp', 'Lâmina da Era Velada', 'SSS+', 'A lâmina lembra nomes que o mundo apagou.'),
+            ('trono_99999', 'Fragmento do Trono Impronunciável', '99999', 'Não foi encontrado. Foi permitido.')
             """
         )
 
@@ -296,6 +317,63 @@ def log_panel_event(
             (user_id, guild_id, event_name, event_action, error_code, now_ts()),
         )
         conn.commit()
+
+
+def resolve_discovery(user_id: str, source: str, forge_level: int) -> str:
+    roll = random.random()
+    rarity = "C"
+    if roll <= 1e-10:
+        rarity = "99999"
+    elif roll <= 1e-8:
+        rarity = "SSS+"
+    elif roll <= 1e-5:
+        rarity = "SSS"
+    elif roll <= 1e-4:
+        rarity = "SS"
+    elif roll <= min(0.02, 0.003 + forge_level * 0.001):
+        rarity = "R"
+    elif roll <= min(0.70, 0.28 + forge_level * 0.03):
+        rarity = "C"
+    else:
+        return "Nenhum achado relevante."
+
+    with get_conn() as conn:
+        item = conn.execute(
+            "SELECT id, name, lore FROM items WHERE rarity = ? ORDER BY RANDOM() LIMIT 1", (rarity,)
+        ).fetchone()
+        if not item:
+            return "Nenhum achado relevante."
+
+        conn.execute(
+            "INSERT INTO inventories (user_id, item_id, quantity) VALUES (?, ?, 1) "
+            "ON CONFLICT(user_id, item_id) DO UPDATE SET quantity = quantity + 1",
+            (user_id, item["id"]),
+        )
+
+        impact = {
+            "C": "+1% ouro da próxima coleta",
+            "R": "+2% recompensa base na próxima operação",
+            "SS": "+1% poder temporário narrativo",
+            "SSS": "+2% poder temporário narrativo",
+            "SSS+": "+3% poder temporário narrativo",
+            "99999": "registro lendário permanente nos Anais",
+        }.get(rarity, "eco narrativo")
+
+        fragment = f"{item['name']}: {item['lore']}"
+        conn.execute(
+            """
+            INSERT INTO discoveries_log (user_id, source, item_id, rarity, fragment_text, impact_text, created_at_ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, source, item["id"], rarity, fragment, impact, now_ts()),
+        )
+        conn.commit()
+
+    return (
+        f"📜 Descoberta: **{item['name']}** [{rarity}]\n"
+        f"Impacto: {impact}\n"
+        f"Registro nos Anais: {fragment}"
+    )
 
 
 def get_or_create_domain(user_id: str) -> sqlite3.Row:
@@ -436,6 +514,7 @@ gameplay = GameplayService(
     get_slot_bonuses=get_slot_bonuses,
     has_strategist_gate=has_strategist_gate,
     now_ts=now_ts,
+    resolve_discovery=resolve_discovery,
 )
 
 def do_collect(user_id: str) -> str:
@@ -731,15 +810,7 @@ async def forjar(ctx: commands.Context) -> None:
         return
 
     tier = d["forge_level"]
-    chance_fragmento = min(0.85, 0.35 + tier * 0.04)
-    chance_reliquia = min(0.25, 0.01 + tier * 0.015)
-    roll = random.random()
-
-    achado = "Escória comum (sem valor)."
-    if roll <= chance_reliquia:
-        achado = "Relíquia menor forjada (R)."
-    elif roll <= chance_fragmento:
-        achado = "Fragmento arcano recuperado (C)."
+    achado = resolve_discovery(user_id, "forja", tier)
 
     update_player_state(user_id, gold=d["gold"] - cost)
     await ctx.send(
@@ -750,6 +821,34 @@ async def forjar(ctx: commands.Context) -> None:
             "Próximo: `!simular_operacao` para buscar achados em campo."
         ).replace(",", ".")
     )
+
+
+@bot.command(name="anais", hidden=True)
+async def anais(ctx: commands.Context) -> None:
+    user_id = str(ctx.author.id)
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT rarity, fragment_text, impact_text, created_at_ts
+            FROM discoveries_log
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT 8
+            """,
+            (user_id,),
+        ).fetchall()
+
+    if not rows:
+        await ctx.send("Nenhum registro encontrado nos Anais. A lore ainda não te encontrou.")
+        return
+
+    lines = []
+    for r in rows:
+        lines.append(
+            f"• [{r['rarity']}] {r['fragment_text']}\n"
+            f"  ↳ Impacto: {r['impact_text']}"
+        )
+    await ctx.send("📖 Anais de Descobertas\n" + "\n".join(lines))
 
 
 
