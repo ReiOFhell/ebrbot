@@ -269,15 +269,52 @@ class OperationSelect(discord.ui.Select):
         super().__init__(placeholder="Selecionar operação para simular", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        user_id = str(interaction.user.id)
+        guild_id = str(interaction.guild_id) if interaction.guild_id else None
         value = self.values[0]
-        if value == "none":
-            await interaction.response.send_message("❌ Nenhuma operação cadastrada.", ephemeral=True)
-            return
-        msg = self.deps.service.do_simular_operacao(str(interaction.user.id), value)
-        await interaction.response.edit_message(
-            embed=self.deps.build_operacoes_embed(str(interaction.user.id), msg),
-            view=OperacoesView(author_id=interaction.user.id, deps=self.deps),
-        )
+        try:
+            if value == "none":
+                await interaction.response.send_message("❌ Nenhuma operação cadastrada.", ephemeral=True)
+                return
+
+            msg = self.deps.service.do_simular_operacao(user_id, value)
+            self.deps.log_panel_event(
+                user_id=user_id,
+                guild_id=guild_id,
+                event_name="panel_action",
+                event_action=f"operacao_select:{value}",
+            )
+            if msg.startswith("❌"):
+                self.deps.log_panel_event(
+                    user_id=user_id,
+                    guild_id=guild_id,
+                    event_name="panel_error",
+                    event_action=f"operacao_select:{value}",
+                    error_code="requirement_missing" if "Requisito ausente" in msg else "action_error",
+                )
+
+            await interaction.response.edit_message(
+                embed=self.deps.build_operacoes_embed(user_id, msg),
+                view=OperacoesView(author_id=interaction.user.id, deps=self.deps),
+            )
+        except Exception as exc:
+            self.deps.log_panel_event(
+                user_id=user_id,
+                guild_id=guild_id,
+                event_name="panel_error",
+                event_action=f"operacao_select:{value}",
+                error_code="interaction_failure",
+            )
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    f"<@{interaction.user.id}> ❌ Falha ao processar operação. Use `!diagnostico` (admin).",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    f"<@{interaction.user.id}> ❌ Falha ao processar operação. Use `!diagnostico` (admin).",
+                    ephemeral=True,
+                )
 
 
 class OperacoesView(discord.ui.View):
