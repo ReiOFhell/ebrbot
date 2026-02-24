@@ -100,7 +100,7 @@ Isso evita meta única e aumenta disputa saudável.
 
 ## 3) Backlog por etapas (execução)
 
-## Etapa A — Base interativa sem mudar lógica (2–3 dias)
+## Etapa A — Base interativa sem mudar lógica (2–3 dias) ✅ Concluída
 
 ### Entregas
 - criar `DominioView` com botões principais;
@@ -110,6 +110,12 @@ Isso evita meta única e aumenta disputa saudável.
 
 ### Critério de pronto
 - jogador consegue usar `!dominio` e executar resgatar/treinar/rank sem comando textual adicional.
+
+### Evidência de implementação
+- `!dominio` envia `DominioView` com botões principais.
+- botão **Resgatar** usa o fluxo central `do_collect(...)`.
+- botão **Treinar** usa o fluxo central `do_train(...)`.
+- botão **Rank** usa `build_rank_embed(...)`.
 
 ---
 
@@ -203,8 +209,8 @@ Acompanhar por semana:
 
 ## 8) Próxima ação imediata (agora)
 
-1. Abrir PR da **Etapa A** só com `DominioView` e 3 botões (Resgatar/Treinar/Rank).
-2. Medir estabilidade por 24h em servidor de teste.
-3. Em seguida, Etapa B (Construções/Militar) em PR separado.
+1. Medir estabilidade da Etapa A por 24h em servidor de teste.
+2. Abrir PR da **Etapa B** com subviews de Construções e Militar.
+3. Em seguida, Etapa C (Operações por painel) em PR separado.
 
 Esse plano mantém risco baixo e entrega valor jogável a cada merge.
