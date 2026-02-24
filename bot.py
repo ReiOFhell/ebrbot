@@ -257,6 +257,19 @@ def init_db() -> None:
             """
         )
 
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS command_errors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                command_name TEXT NOT NULL,
+                error_type TEXT NOT NULL,
+                error_text TEXT NOT NULL,
+                created_at_ts INTEGER NOT NULL
+            )
+            """
+        )
+
         # Compatibilidade incremental base (fundação do domínio)
         ensure_column(conn, "domains", "created_at_ts", "INTEGER NOT NULL DEFAULT 0")
 
@@ -299,6 +312,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_strategists_user ON strategists(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_panel_events_user ON panel_events(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_panel_events_name ON panel_events(event_name)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_command_errors_ts ON command_errors(created_at_ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_discoveries_user ON discoveries_log(user_id)")
 
         # seeds mínimos
@@ -405,6 +419,21 @@ def log_panel_event(
         conn.commit()
 
 
+def log_command_error(user_id: str | None, command_name: str, error: Exception) -> None:
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO command_errors (user_id, command_name, error_type, error_text, created_at_ts)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (user_id, command_name, error.__class__.__name__, str(error)[:500], now_ts()),
+            )
+            conn.commit()
+    except Exception:
+        logger.exception("Falha ao persistir command_errors")
+
+
 def resolve_discovery(user_id: str, source: str, forge_level: int) -> str:
     roll = random.random()
     rarity = "C"
@@ -487,10 +516,18 @@ def get_or_create_domain(user_id: str) -> sqlite3.Row:
 
         return conn.execute(
             """
-            SELECT d.user_id, d.created_at_ts,
-                   b.barn_level, b.barracks_level, b.forge_level,
-                   r.gold, r.accumulated_maintenance, r.last_collect_ts,
-                   a.troops, a.doctrine, a.power, a.last_train_ts, a.general_id, a.strategist_id
+            SELECT d.user_id, COALESCE(d.created_at_ts, 0) AS created_at_ts,
+                   COALESCE(b.barn_level, 1) AS barn_level,
+                   COALESCE(b.barracks_level, 1) AS barracks_level,
+                   COALESCE(b.forge_level, 1) AS forge_level,
+                   COALESCE(r.gold, 100000) AS gold,
+                   COALESCE(r.accumulated_maintenance, 0) AS accumulated_maintenance,
+                   COALESCE(r.last_collect_ts, 0) AS last_collect_ts,
+                   COALESCE(a.troops, 0) AS troops,
+                   COALESCE(a.doctrine, 'choque') AS doctrine,
+                   COALESCE(a.power, 0) AS power,
+                   COALESCE(a.last_train_ts, 0) AS last_train_ts,
+                   a.general_id, a.strategist_id
             FROM domains d
             JOIN domain_buildings b ON b.user_id = d.user_id
             JOIN resources r ON r.user_id = d.user_id
@@ -809,14 +846,19 @@ def build_panel_deps() -> PanelDeps:
 
 @bot.command(name="dominio")
 async def dominio(ctx: commands.Context) -> None:
-    log_panel_event(
-        user_id=str(ctx.author.id),
-        guild_id=str(ctx.guild.id) if ctx.guild else None,
-        event_name="panel_open",
-        event_action="dominio",
-    )
-    embed = build_dominio_embed(str(ctx.author.id))
-    await ctx.send(embed=embed, view=UIDominioView(author_id=ctx.author.id, deps=build_panel_deps()))
+    try:
+        log_panel_event(
+            user_id=str(ctx.author.id),
+            guild_id=str(ctx.guild.id) if ctx.guild else None,
+            event_name="panel_open",
+            event_action="dominio",
+        )
+        embed = build_dominio_embed(str(ctx.author.id))
+        await ctx.send(content=f"<@{ctx.author.id}>", embed=embed, view=UIDominioView(author_id=ctx.author.id, deps=build_panel_deps()))
+    except Exception as exc:
+        log_command_error(str(ctx.author.id), "dominio", exc)
+        logger.exception("Erro no comando !dominio", exc_info=exc)
+        await ctx.send(f"<@{ctx.author.id}> Erro interno ao executar comando. Use `!diagnostico` (admin) para detalhes.")
 
 
 @bot.command(name="coletar", hidden=True)
@@ -1051,12 +1093,29 @@ async def diagnostico(ctx: commands.Context) -> None:
         counts = {}
         for table in [
             "domains", "domain_buildings", "resources", "army", "generals", "strategists", "operations",
-            "operation_runs", "items", "inventories", "season_state", "season_scores", "panel_events",
+            "operation_runs", "items", "inventories", "season_state", "season_scores", "panel_events", "command_errors",
         ]:
             counts[table] = conn.execute(f"SELECT COUNT(*) c FROM {table}").fetchone()["c"]
 
+        recent_errors = conn.execute(
+            """
+            SELECT command_name, error_type, error_text, created_at_ts, user_id
+            FROM command_errors
+            ORDER BY id DESC
+            LIMIT 5
+            """
+        ).fetchall()
+
     lines = [f"{k}: {v}" for k, v in counts.items()]
-    await ctx.send(f"Diagnóstico Fase 1\nDB: `{DB_PATH}`\n" + "\n".join(lines))
+    err_lines = [
+        f"• {r['command_name']} | {r['error_type']} | uid={r['user_id'] or '-'} | {r['error_text'][:120]}"
+        for r in recent_errors
+    ] or ["• sem erros registrados"]
+
+    await ctx.send(
+        f"Diagnóstico Fase 1\nDB: `{DB_PATH}`\n" + "\n".join(lines) +
+        "\n\nÚltimos erros de comando:\n" + "\n".join(err_lines)
+    )
 
 
 @bot.command(name="painel_kpis", hidden=True)
@@ -1231,6 +1290,8 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
     if isinstance(error, commands.CommandNotFound):
         return
     logger.exception("Erro de comando", exc_info=error)
+    cmd_name = ctx.command.qualified_name if ctx.command else "desconhecido"
+    log_command_error(str(ctx.author.id), cmd_name, error)
     await ctx.send(f"<@{ctx.author.id}> Erro interno ao executar comando.")
 
 
