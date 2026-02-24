@@ -21,6 +21,29 @@ Ter **1 entrada central** (`!dominio`) que permita jogar o núcleo inteiro sem d
 - ≥ 2,5 ações médias por sessão de painel.
 - aumento de retenção D1/D7 após migração para clique-first.
 
+
+
+## 1.1 Quadro executivo do Norte (para acompanhamento semanal)
+
+### Meta operacional
+- `!dominio` deve ser a porta de entrada padrão do jogo.
+
+### KPIs-alvo
+- **Adoção do painel:** ≥ 70% dos jogadores ativos usando `!dominio` como primeira ação da sessão.
+- **Erro de uso:** ≤ 15% de mensagens de erro por comando inválido/uso incorreto.
+- **Engajamento por sessão:** ≥ 2,5 ações médias por sessão iniciada no painel.
+- **Retenção:** crescimento de D1/D7 após migração para fluxo clique-first.
+
+### Instrumentação mínima
+- Registrar evento `panel_open` ao usar `!dominio`.
+- Registrar evento `panel_action` por botão (`resgatar`, `treinar`, `construcoes`, `militar`, `operacoes`, `rank`).
+- Registrar evento `panel_error` com código de requisito ausente.
+- Consolidar relatórios semanais por usuário ativo e por botão.
+
+### Critério de decisão
+- Se 2 semanas seguidas ficarem abaixo dos KPIs, simplificar fluxo e reduzir profundidade visível do painel antes de adicionar novas mecânicas.
+
+
 ---
 
 ## 2) Escopo funcional do painel
