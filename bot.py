@@ -321,7 +321,7 @@ def has_strategist_gate(domain: sqlite3.Row, conn: sqlite3.Connection) -> tuple[
         return False, "Requisito: 200.000 ouro para manter conselho estratégico."
     runs = conn.execute("SELECT COUNT(*) c FROM operation_runs WHERE user_id = ?", (domain["user_id"],)).fetchone()["c"]
     if runs < 1:
-        return False, "Requisito: concluir ao menos 1 operação para desbloquear estrategista."
+        return False, "Requisito: concluir ao menos 1 operação (ex.: `!simular_operacao estrada_cinzas`) para desbloquear estrategista."
     return True, "OK"
 
 
@@ -657,14 +657,29 @@ async def simular_operacao(ctx: commands.Context, key: str | None = None) -> Non
         chance = simulate_operation_success_chance(d["power"], op["difficulty_power"], d["doctrine"], op["preferred_doctrine"])
 
     outcome = "vitória tática" if random.random() <= chance else "falha tática"
+    troops_lost = int(d["troops"] * op["base_risk_percent"] * (0.4 if outcome == "vitória tática" else 0.8))
+    gold_delta = int(op["base_gold_reward"] * (1.0 if outcome == "vitória tática" else 0.2))
+
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO operation_runs (user_id, operation_id, outcome, troops_lost, gold_delta, created_at_ts)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, op["id"], outcome, troops_lost, gold_delta, now_ts()),
+        )
+        conn.commit()
+
     await ctx.send(
         (
             f"🧪 Simulação `{op['title']}`\n"
             f"Poder atual: {d['power']:,} | Dificuldade: {op['difficulty_power']:,}\n"
             f"Chance estimada: {chance*100:.1f}%\n"
-            f"Resultado simulado: **{outcome}**"
+            f"Resultado simulado: **{outcome}**\n"
+            f"Registro: perdas estimadas {troops_lost:,} tropas | recompensa base {gold_delta:,} ouro"
         ).replace(",", ".")
     )
+
 
 
 @bot.command(name="rank")
