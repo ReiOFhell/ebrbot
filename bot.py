@@ -224,6 +224,19 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS panel_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                guild_id TEXT,
+                event_name TEXT NOT NULL,
+                event_action TEXT,
+                error_code TEXT,
+                created_at_ts INTEGER NOT NULL
+            )
+            """
+        )
 
         # Compatibilidade incremental de colunas da Fase 3
         ensure_column(conn, "army", "general_id", "INTEGER")
@@ -234,6 +247,8 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_operation_runs_user ON operation_runs(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_generals_user ON generals(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_strategists_user ON strategists(user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_panel_events_user ON panel_events(user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_panel_events_name ON panel_events(event_name)")
 
         # seeds mínimos
         conn.execute(
@@ -259,6 +274,25 @@ def init_db() -> None:
         conn.execute("UPDATE operations SET difficulty_power = 3500, preferred_doctrine = 'cerco' WHERE key = 'ruinas_muralha'")
         conn.execute("UPDATE operations SET difficulty_power = 1600, preferred_doctrine = 'choque' WHERE key = 'estrada_cinzas'")
 
+        conn.commit()
+
+
+def log_panel_event(
+    *,
+    user_id: str,
+    guild_id: str | None,
+    event_name: str,
+    event_action: str | None = None,
+    error_code: str | None = None,
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO panel_events (user_id, guild_id, event_name, event_action, error_code, created_at_ts)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, guild_id, event_name, event_action, error_code, now_ts()),
+        )
         conn.commit()
 
 
@@ -475,22 +509,47 @@ class DominioView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
+            log_panel_event(
+                user_id=str(interaction.user.id),
+                guild_id=str(interaction.guild_id) if interaction.guild_id else None,
+                event_name="panel_error",
+                event_action="interaction_check",
+                error_code="not_panel_owner",
+            )
             await interaction.response.send_message("❌ Apenas o dono do painel pode usar estes botões.", ephemeral=True)
             return False
         return True
 
     @discord.ui.button(label="Resgatar", style=discord.ButtonStyle.success)
     async def btn_resgatar(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        log_panel_event(
+            user_id=str(interaction.user.id),
+            guild_id=str(interaction.guild_id) if interaction.guild_id else None,
+            event_name="panel_action",
+            event_action="resgatar",
+        )
         msg = do_collect(str(interaction.user.id))
         await interaction.response.send_message(msg, ephemeral=True)
 
     @discord.ui.button(label="Treinar", style=discord.ButtonStyle.primary)
     async def btn_treinar(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        log_panel_event(
+            user_id=str(interaction.user.id),
+            guild_id=str(interaction.guild_id) if interaction.guild_id else None,
+            event_name="panel_action",
+            event_action="treinar",
+        )
         msg = do_train(str(interaction.user.id))
         await interaction.response.send_message(msg, ephemeral=True)
 
     @discord.ui.button(label="Construções", style=discord.ButtonStyle.secondary)
     async def btn_construcoes(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        log_panel_event(
+            user_id=str(interaction.user.id),
+            guild_id=str(interaction.guild_id) if interaction.guild_id else None,
+            event_name="panel_action",
+            event_action="construcoes",
+        )
         d = get_or_create_domain(str(interaction.user.id))
         await interaction.response.send_message(
             (
@@ -503,6 +562,12 @@ class DominioView(discord.ui.View):
 
     @discord.ui.button(label="Militar", style=discord.ButtonStyle.secondary)
     async def btn_militar(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        log_panel_event(
+            user_id=str(interaction.user.id),
+            guild_id=str(interaction.guild_id) if interaction.guild_id else None,
+            event_name="panel_action",
+            event_action="militar",
+        )
         d = get_or_create_domain(str(interaction.user.id))
         await interaction.response.send_message(
             (
@@ -515,6 +580,12 @@ class DominioView(discord.ui.View):
 
     @discord.ui.button(label="Operações", style=discord.ButtonStyle.secondary)
     async def btn_operacoes(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        log_panel_event(
+            user_id=str(interaction.user.id),
+            guild_id=str(interaction.guild_id) if interaction.guild_id else None,
+            event_name="panel_action",
+            event_action="operacoes",
+        )
         with get_conn() as conn:
             ops = conn.execute("SELECT key, title, min_barracks_level, requires_strategist FROM operations ORDER BY id").fetchall()
         d = get_or_create_domain(str(interaction.user.id))
@@ -536,11 +607,23 @@ class DominioView(discord.ui.View):
 
     @discord.ui.button(label="Rank", style=discord.ButtonStyle.secondary)
     async def btn_rank(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        log_panel_event(
+            user_id=str(interaction.user.id),
+            guild_id=str(interaction.guild_id) if interaction.guild_id else None,
+            event_name="panel_action",
+            event_action="rank",
+        )
         await interaction.response.send_message(embed=build_rank_embed(), ephemeral=True)
 
 
 @bot.command(name="dominio")
 async def dominio(ctx: commands.Context) -> None:
+    log_panel_event(
+        user_id=str(ctx.author.id),
+        guild_id=str(ctx.guild.id) if ctx.guild else None,
+        event_name="panel_open",
+        event_action="dominio",
+    )
     d = get_or_create_domain(str(ctx.author.id))
     snap = economy_snapshot(
         barn_level=d["barn_level"],
@@ -871,12 +954,72 @@ async def diagnostico(ctx: commands.Context) -> None:
         counts = {}
         for table in [
             "domains", "domain_buildings", "resources", "army", "generals", "strategists", "operations",
-            "operation_runs", "items", "inventories", "season_state", "season_scores",
+            "operation_runs", "items", "inventories", "season_state", "season_scores", "panel_events",
         ]:
             counts[table] = conn.execute(f"SELECT COUNT(*) c FROM {table}").fetchone()["c"]
 
     lines = [f"{k}: {v}" for k, v in counts.items()]
     await ctx.send(f"Diagnóstico Fase 1\nDB: `{DB_PATH}`\n" + "\n".join(lines))
+
+
+@bot.command(name="painel_kpis")
+@commands.has_permissions(administrator=True)
+async def painel_kpis(ctx: commands.Context) -> None:
+    week_ago = now_ts() - (7 * 24 * 3600)
+    with get_conn() as conn:
+        opens = conn.execute(
+            "SELECT COUNT(*) c FROM panel_events WHERE event_name = 'panel_open' AND created_at_ts >= ?",
+            (week_ago,),
+        ).fetchone()["c"]
+        errors = conn.execute(
+            "SELECT COUNT(*) c FROM panel_events WHERE event_name = 'panel_error' AND created_at_ts >= ?",
+            (week_ago,),
+        ).fetchone()["c"]
+        actions = conn.execute(
+            "SELECT COUNT(*) c FROM panel_events WHERE event_name = 'panel_action' AND created_at_ts >= ?",
+            (week_ago,),
+        ).fetchone()["c"]
+        unique_open_users = conn.execute(
+            "SELECT COUNT(DISTINCT user_id) c FROM panel_events WHERE event_name = 'panel_open' AND created_at_ts >= ?",
+            (week_ago,),
+        ).fetchone()["c"]
+        active_users = conn.execute(
+            "SELECT COUNT(DISTINCT user_id) c FROM panel_events WHERE created_at_ts >= ?",
+            (week_ago,),
+        ).fetchone()["c"]
+        by_button = conn.execute(
+            """
+            SELECT event_action, COUNT(*) c
+            FROM panel_events
+            WHERE event_name = 'panel_action' AND created_at_ts >= ?
+            GROUP BY event_action
+            ORDER BY c DESC
+            """,
+            (week_ago,),
+        ).fetchall()
+
+    adoption = (unique_open_users / active_users * 100.0) if active_users else 0.0
+    error_rate = (errors / (actions + errors) * 100.0) if (actions + errors) else 0.0
+    action_per_open = (actions / opens) if opens else 0.0
+
+    lines = [f"• {r['event_action']}: {r['c']}" for r in by_button] if by_button else ["• sem dados"]
+    await ctx.send(
+        "📊 KPIs do Painel (7 dias)\n"
+        f"Adoção painel: {adoption:.1f}% (meta ≥ 70%)\n"
+        f"Erro de uso: {error_rate:.1f}% (meta ≤ 15%)\n"
+        f"Ações por sessão: {action_per_open:.2f} (meta ≥ 2.5)\n"
+        f"Usuários com panel_open: {unique_open_users} | Usuários ativos: {active_users}\n"
+        "Ações por botão:\n" + "\n".join(lines)
+    )
+
+
+@painel_kpis.error
+async def painel_kpis_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Apenas administradores podem usar `!painel_kpis`.")
+        return
+    logger.exception("Erro em !painel_kpis", exc_info=error)
+    await ctx.send("Erro interno no relatório de KPIs.")
 
 
 @diagnostico.error
