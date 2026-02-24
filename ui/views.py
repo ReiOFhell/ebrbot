@@ -251,13 +251,18 @@ class OperationSelect(discord.ui.Select):
             ).fetchall()
         options: list[discord.SelectOption] = []
         for op in ops:
+            min_barracks_level = int(op["min_barracks_level"] or 1)
+            requires_general = int(op["requires_general"] or 0)
+            requires_strategist = int(op["requires_strategist"] or 0)
+            partial_without_strategist = int(op["partial_without_strategist"] or 0)
+
             desc = "Disponível"
-            if d["barracks_level"] < op["min_barracks_level"]:
-                desc = f"Requer Casernas T{op['min_barracks_level']}+"
-            elif op["requires_general"] and not d["general_id"]:
+            if d["barracks_level"] < min_barracks_level:
+                desc = f"Requer Casernas T{min_barracks_level}+"
+            elif requires_general and not d["general_id"]:
                 desc = "Requer general equipado"
-            elif op["requires_strategist"] and not d["strategist_id"]:
-                desc = "Rota parcial sem estrategista" if op["partial_without_strategist"] else "Requer estrategista equipado"
+            elif requires_strategist and not d["strategist_id"]:
+                desc = "Rota parcial sem estrategista" if partial_without_strategist else "Requer estrategista equipado"
             options.append(discord.SelectOption(label=op["title"], value=op["key"], description=desc[:100]))
         if not options:
             options = [discord.SelectOption(label="Sem operações", value="none")]

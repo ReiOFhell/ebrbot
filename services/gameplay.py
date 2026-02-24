@@ -183,12 +183,22 @@ class GameplayService:
         self.update_player_state(user_id, strategist_id=strategist_id, power=new_power)
         return f"✅ Estrategista equipado (id {strategist_id}).\nΔ Poder: {new_power:,}\nPróximo: iniciar simulação de operação".replace(",", ".")
 
+    def _normalize_operation_key(self, raw_key: str) -> str:
+        key = raw_key.strip().lower()
+        aliases = {
+            "estrada_cinza": "estrada_cinzas",
+            "estrada-das-cinzas": "estrada_cinzas",
+            "ruinas_muralhas": "ruinas_muralha",
+        }
+        return aliases.get(key, key)
+
     def do_simular_operacao(self, user_id: str, key: str) -> str:
         d = self.get_or_create_domain(user_id)
         with self.get_conn() as conn:
-            op = conn.execute("SELECT * FROM operations WHERE key = ?", (key.strip().lower(),)).fetchone()
+            op_key = self._normalize_operation_key(key)
+            op = conn.execute("SELECT * FROM operations WHERE key = ?", (op_key,)).fetchone()
             if not op:
-                return "❌ Operação inválida."
+                return "❌ Operação inválida. Use: tumba_sultao, ruinas_muralha, estrada_cinzas."
             min_barracks_level = int(op["min_barracks_level"] or 1)
             requires_general = int(op["requires_general"] or 0)
             requires_strategist = int(op["requires_strategist"] or 0)
