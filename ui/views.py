@@ -369,15 +369,17 @@ class DominioView(discord.ui.View):
         if not ok:
             await interaction.response.send_message(f"❌ {reason}. Aguarde e tente novamente.", ephemeral=True)
             return
-        msg = self.deps.service.do_collect(str(interaction.user.id))
-        self._log_action_result(
-            user_id=user_id,
-            guild_id=guild_id,
-            action="resgatar",
-            message=msg,
-        )
-        await interaction.response.send_message(msg, ephemeral=True)
-        ActionGuard.leave(user_id, "resgatar")
+        try:
+            msg = self.deps.service.do_collect(str(interaction.user.id))
+            self._log_action_result(
+                user_id=user_id,
+                guild_id=guild_id,
+                action="resgatar",
+                message=msg,
+            )
+            await interaction.response.send_message(msg, ephemeral=True)
+        finally:
+            ActionGuard.leave(user_id, "resgatar")
 
     @discord.ui.button(label="Treinar", style=discord.ButtonStyle.primary)
     async def btn_treinar(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -387,15 +389,17 @@ class DominioView(discord.ui.View):
         if not ok:
             await interaction.response.send_message(f"❌ {reason}. Aguarde e tente novamente.", ephemeral=True)
             return
-        msg = self.deps.service.do_train(str(interaction.user.id))
-        self._log_action_result(
-            user_id=user_id,
-            guild_id=guild_id,
-            action="treinar",
-            message=msg,
-        )
-        await interaction.response.send_message(msg, ephemeral=True)
-        ActionGuard.leave(user_id, "treinar")
+        try:
+            msg = self.deps.service.do_train(str(interaction.user.id))
+            self._log_action_result(
+                user_id=user_id,
+                guild_id=guild_id,
+                action="treinar",
+                message=msg,
+            )
+            await interaction.response.send_message(msg, ephemeral=True)
+        finally:
+            ActionGuard.leave(user_id, "treinar")
 
     @discord.ui.button(label="Construções", style=discord.ButtonStyle.secondary)
     async def btn_construcoes(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -405,15 +409,17 @@ class DominioView(discord.ui.View):
         if not ok:
             await interaction.response.send_message(f"❌ {reason}. Aguarde e tente novamente.", ephemeral=True)
             return
-        self.deps.log_panel_event(
-            user_id=user_id,
-            guild_id=guild_id,
-            event_name="panel_action",
-            event_action="construcoes",
-        )
-        embed = self.deps.build_construcoes_embed(user_id, None)
-        await interaction.response.edit_message(embed=embed, view=ConstrucoesView(author_id=interaction.user.id, deps=self.deps))
-        ActionGuard.leave(user_id, "construcoes")
+        try:
+            self.deps.log_panel_event(
+                user_id=user_id,
+                guild_id=guild_id,
+                event_name="panel_action",
+                event_action="construcoes",
+            )
+            embed = self.deps.build_construcoes_embed(user_id, None)
+            await interaction.response.edit_message(embed=embed, view=ConstrucoesView(author_id=interaction.user.id, deps=self.deps))
+        finally:
+            ActionGuard.leave(user_id, "construcoes")
 
     @discord.ui.button(label="Militar", style=discord.ButtonStyle.secondary)
     async def btn_militar(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -423,17 +429,19 @@ class DominioView(discord.ui.View):
         if not ok:
             await interaction.response.send_message(f"❌ {reason}. Aguarde e tente novamente.", ephemeral=True)
             return
-        self.deps.log_panel_event(
-            user_id=user_id,
-            guild_id=guild_id,
-            event_name="panel_action",
-            event_action="militar",
-        )
-        await interaction.response.edit_message(
-            embed=self.deps.build_militar_embed(user_id, None),
-            view=MilitarView(author_id=interaction.user.id, deps=self.deps),
-        )
-        ActionGuard.leave(user_id, "militar")
+        try:
+            self.deps.log_panel_event(
+                user_id=user_id,
+                guild_id=guild_id,
+                event_name="panel_action",
+                event_action="militar",
+            )
+            await interaction.response.edit_message(
+                embed=self.deps.build_militar_embed(user_id, None),
+                view=MilitarView(author_id=interaction.user.id, deps=self.deps),
+            )
+        finally:
+            ActionGuard.leave(user_id, "militar")
 
     @discord.ui.button(label="Operações", style=discord.ButtonStyle.secondary)
     async def btn_operacoes(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -443,17 +451,19 @@ class DominioView(discord.ui.View):
         if not ok:
             await interaction.response.send_message(f"❌ {reason}. Aguarde e tente novamente.", ephemeral=True)
             return
-        self.deps.log_panel_event(
-            user_id=user_id,
-            guild_id=guild_id,
-            event_name="panel_action",
-            event_action="operacoes",
-        )
-        await interaction.response.edit_message(
-            embed=self.deps.build_operacoes_embed(user_id, None),
-            view=OperacoesView(author_id=interaction.user.id, deps=self.deps),
-        )
-        ActionGuard.leave(user_id, "operacoes")
+        try:
+            self.deps.log_panel_event(
+                user_id=user_id,
+                guild_id=guild_id,
+                event_name="panel_action",
+                event_action="operacoes",
+            )
+            await interaction.response.edit_message(
+                embed=self.deps.build_operacoes_embed(user_id, None),
+                view=OperacoesView(author_id=interaction.user.id, deps=self.deps),
+            )
+        finally:
+            ActionGuard.leave(user_id, "operacoes")
 
     @discord.ui.button(label="Rank", style=discord.ButtonStyle.secondary)
     async def btn_rank(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -463,15 +473,17 @@ class DominioView(discord.ui.View):
         if not ok:
             await interaction.response.send_message(f"❌ {reason}. Aguarde e tente novamente.", ephemeral=True)
             return
-        self.deps.log_panel_event(
-            user_id=user_id,
-            guild_id=guild_id,
-            event_name="panel_action",
-            event_action="rank",
-        )
-        await interaction.response.send_message(
-            content="✅ Painel de rank aberto.\nΔ Tops de riqueza/poder atualizados\nPróximo: volte ao domínio e execute Resgatar/Treinar para subir.",
-            embed=self.deps.build_rank_embed(),
-            ephemeral=True,
-        )
-        ActionGuard.leave(user_id, "rank")
+        try:
+            self.deps.log_panel_event(
+                user_id=user_id,
+                guild_id=guild_id,
+                event_name="panel_action",
+                event_action="rank",
+            )
+            await interaction.response.send_message(
+                content="✅ Painel de rank aberto.\nΔ Tops de riqueza/poder atualizados\nPróximo: volte ao domínio e execute Resgatar/Treinar para subir.",
+                embed=self.deps.build_rank_embed(),
+                ephemeral=True,
+            )
+        finally:
+            ActionGuard.leave(user_id, "rank")
