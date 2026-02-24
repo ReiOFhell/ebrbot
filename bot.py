@@ -48,6 +48,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 DOCTRINES = {"cerco", "choque", "furtivo", "arcano"}
 GENERAL_RANK_BONUS = {"C": 0.02, "B": 0.04, "A": 0.06, "S": 0.10}
 STRATEGIST_RANK_BONUS = {"C": 0.015, "B": 0.03, "A": 0.05, "S": 0.08}
+MAX_BUILDING_TIER = 10
 
 
 def now_ts() -> int:
@@ -420,7 +421,7 @@ async def dominio(ctx: commands.Context) -> None:
         inline=False,
     )
     embed.add_field(name="Militar", value=(f"👥 Tropas: **{d['troops']:,}**\n⚔️ Poder: **{d['power']:,}**\n🧭 Doutrina: **{d['doctrine']}**\n🎖️ General slot: **{d['general_id'] or 'vazio'}**\n📐 Estrategista slot: **{d['strategist_id'] or 'vazio'}**").replace(",", "."), inline=False)
-    embed.set_footer(text="Ações: !coletar • !treinar • !melhorar <celeiros|casernas|forja> • !rank")
+    embed.set_footer(text="Ações: !coletar • !treinar • !melhorar <celeiros|casernas|forja> • !forjar • !simular_operacao • !rank")
     await ctx.send(embed=embed)
 
 
@@ -508,6 +509,9 @@ async def melhorar(ctx: commands.Context, estrutura: str | None = None) -> None:
 
     level_key = {"celeiros": "barn_level", "casernas": "barracks_level", "forja": "forge_level"}[estrutura]
     level = d[level_key]
+    if level >= MAX_BUILDING_TIER:
+        await ctx.send(f"❌ {estrutura.title()} já está no nível máximo (T{MAX_BUILDING_TIER}).")
+        return
     cost = building_upgrade_cost(level, estrutura)
     if d["gold"] < cost:
         await ctx.send(f"❌ Ouro insuficiente. Falta {(cost - d['gold']):,}.".replace(",", "."))
@@ -654,11 +658,16 @@ async def simular_operacao(ctx: commands.Context, key: str | None = None) -> Non
         if op["requires_strategist"] and not d["strategist_id"]:
             await ctx.send("❌ Requisito ausente: Estrategista equipado para esta operação.")
             return
+        if d["troops"] <= 0:
+            await ctx.send("❌ Requisito ausente: sem tropas não há incursão.")
+            return
         chance = simulate_operation_success_chance(d["power"], op["difficulty_power"], d["doctrine"], op["preferred_doctrine"])
 
     outcome = "vitória tática" if random.random() <= chance else "falha tática"
-    troops_lost = int(d["troops"] * op["base_risk_percent"] * (0.4 if outcome == "vitória tática" else 0.8))
-    gold_delta = int(op["base_gold_reward"] * (1.0 if outcome == "vitória tática" else 0.2))
+    troops_lost = int(max(1, d["troops"] * op["base_risk_percent"] * (0.4 if outcome == "vitória tática" else 0.8)))
+    base_gold_delta = int(op["base_gold_reward"] * (1.0 if outcome == "vitória tática" else 0.2))
+    forge_mult = 1.0 + (d["forge_level"] - 1) * 0.03
+    gold_delta = int(base_gold_delta * forge_mult)
 
     with get_conn() as conn:
         conn.execute(
@@ -670,15 +679,53 @@ async def simular_operacao(ctx: commands.Context, key: str | None = None) -> Non
         )
         conn.commit()
 
+    relic_line = "Nenhum achado relevante."
+    if d["forge_level"] >= 4 and random.random() <= min(0.20, 0.04 + d["forge_level"] * 0.01):
+        relic_line = "Achado: fragmento relicário encontrado na incursão."
+
     await ctx.send(
         (
             f"🧪 Simulação `{op['title']}`\n"
             f"Poder atual: {d['power']:,} | Dificuldade: {op['difficulty_power']:,}\n"
             f"Chance estimada: {chance*100:.1f}%\n"
             f"Resultado simulado: **{outcome}**\n"
-            f"Registro: perdas estimadas {troops_lost:,} tropas | recompensa base {gold_delta:,} ouro"
+            f"Registro: perdas estimadas {troops_lost:,} tropas | recompensa base {gold_delta:,} ouro\n"
+            f"{relic_line}"
         ).replace(",", ".")
     )
+
+
+
+@bot.command(name="forjar")
+async def forjar(ctx: commands.Context) -> None:
+    user_id = str(ctx.author.id)
+    d = get_or_create_domain(user_id)
+    cost = 50_000 + (d["forge_level"] - 1) * 35_000
+    if d["gold"] < cost:
+        await ctx.send(f"❌ Ouro insuficiente para forja. Falta {(cost - d['gold']):,}.".replace(",", "."))
+        return
+
+    tier = d["forge_level"]
+    chance_fragmento = min(0.85, 0.35 + tier * 0.04)
+    chance_reliquia = min(0.25, 0.01 + tier * 0.015)
+    roll = random.random()
+
+    achado = "Escória comum (sem valor)."
+    if roll <= chance_reliquia:
+        achado = "Relíquia menor forjada (R)."
+    elif roll <= chance_fragmento:
+        achado = "Fragmento arcano recuperado (C)."
+
+    update_player_state(user_id, gold=d["gold"] - cost)
+    await ctx.send(
+        (
+            f"🔨 Forja concluída (T{tier}).\n"
+            f"Δ Ouro: -{cost:,}\n"
+            f"Resultado: {achado}\n"
+            "Próximo: `!simular_operacao` para buscar achados em campo."
+        ).replace(",", ".")
+    )
+
 
 
 
@@ -738,7 +785,7 @@ async def economia_teste_error(ctx: commands.Context, error: commands.CommandErr
 async def guia(ctx: commands.Context) -> None:
     await ctx.send(
         "**Núcleo C — Fase 1 ativa.**\n"
-        "Comandos: `!dominio`, `!coletar`, `!treinar`, `!melhorar`, `!doutrina`, `!recrutar_general`, `!equipar_general`, `!recrutar_estrategista`, `!equipar_estrategista`, `!simular_operacao`, `!rank`, `!economia_teste`, `!diagnostico`, `!guia`.\n"
+        "Comandos: `!dominio`, `!coletar`, `!treinar`, `!melhorar`, `!doutrina`, `!recrutar_general`, `!equipar_general`, `!recrutar_estrategista`, `!equipar_estrategista`, `!forjar`, `!simular_operacao`, `!rank`, `!economia_teste`, `!diagnostico`, `!guia`.\n"
         "Loop: Coletar → Melhorar → Treinar → Rank."
     )
 
