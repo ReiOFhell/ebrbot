@@ -245,14 +245,19 @@ class OperationSelect(discord.ui.Select):
         self.deps = deps
         d = deps.get_or_create_domain(user_id)
         with deps.get_conn() as conn:
-            ops = conn.execute("SELECT key, title, min_barracks_level, requires_strategist FROM operations ORDER BY id").fetchall()
+            ops = conn.execute(
+                "SELECT key, title, min_barracks_level, requires_general, requires_strategist, partial_without_strategist "
+                "FROM operations ORDER BY id"
+            ).fetchall()
         options: list[discord.SelectOption] = []
         for op in ops:
             desc = "Disponível"
             if d["barracks_level"] < op["min_barracks_level"]:
                 desc = f"Requer Casernas T{op['min_barracks_level']}+"
+            elif op["requires_general"] and not d["general_id"]:
+                desc = "Requer general equipado"
             elif op["requires_strategist"] and not d["strategist_id"]:
-                desc = "Requer estrategista equipado"
+                desc = "Rota parcial sem estrategista" if op["partial_without_strategist"] else "Requer estrategista equipado"
             options.append(discord.SelectOption(label=op["title"], value=op["key"], description=desc[:100]))
         if not options:
             options = [discord.SelectOption(label="Sem operações", value="none")]

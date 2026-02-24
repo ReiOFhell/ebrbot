@@ -191,19 +191,48 @@ class GameplayService:
                 return "❌ Operação inválida."
             if d["barracks_level"] < op["min_barracks_level"]:
                 return f"❌ Requisito ausente: Casernas T{op['min_barracks_level']}+."
-            if op["requires_strategist"] and not d["strategist_id"]:
-                return "❌ Requisito ausente: Estrategista equipado para esta operação."
+            if op["requires_general"] and not d["general_id"]:
+                return "❌ Requisito ausente: General equipado para esta operação."
             if d["troops"] <= 0:
                 return "❌ Requisito ausente: sem tropas não há incursão."
             chance = simulate_operation_success_chance(d["power"], op["difficulty_power"], d["doctrine"], op["preferred_doctrine"])
 
+            partial_route = False
+            if op["requires_strategist"] and not d["strategist_id"]:
+                if op["partial_without_strategist"]:
+                    partial_route = True
+                    chance *= 0.55
+                else:
+                    return "❌ Requisito ausente: Estrategista equipado para esta operação."
+
         outcome = "vitória tática" if random.random() <= chance else "falha tática"
-        troops_lost = int(max(1, d["troops"] * op["base_risk_percent"] * (0.4 if outcome == "vitória tática" else 0.8)))
-        base_gold_delta = int(op["base_gold_reward"] * (1.0 if outcome == "vitória tática" else 0.2))
+        risk_mult = 1.0
+        reward_mult = 1.0
+        prestige_mult = 1.0
+        route_line = "Rota completa habilitada."
+        if partial_route:
+            risk_mult = 1.35
+            reward_mult = 0.45
+            prestige_mult = 0.35
+            route_line = "Rota parcial: sem estrategista, retorno incompleto."
+
+        troops_lost = int(max(1, d["troops"] * op["base_risk_percent"] * (0.4 if outcome == "vitória tática" else 0.8) * risk_mult))
+        base_gold_delta = int(op["base_gold_reward"] * (1.0 if outcome == "vitória tática" else 0.2) * reward_mult)
+        prestige_gain = int(op["prestige_reward"] * (1.0 if outcome == "vitória tática" else 0.4) * prestige_mult)
         forge_mult = 1.0 + (d["forge_level"] - 1) * 0.03
         gold_delta = int(base_gold_delta * forge_mult)
 
         with self.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO season_scores (season_number, user_id, prestige, wealth_snapshot, power_snapshot, updated_at_ts)
+                VALUES (1, ?, ?, 0, 0, ?)
+                ON CONFLICT(season_number, user_id) DO UPDATE SET
+                    prestige = prestige + excluded.prestige,
+                    updated_at_ts = excluded.updated_at_ts
+                """,
+                (user_id, prestige_gain, self.now_ts()),
+            )
             conn.execute(
                 """
                 INSERT INTO operation_runs (user_id, operation_id, outcome, troops_lost, gold_delta, created_at_ts)
@@ -217,10 +246,11 @@ class GameplayService:
 
         return (
             f"🧪 Simulação `{op['title']}`\n"
+            f"{route_line}\n"
             f"Poder atual: {d['power']:,} | Dificuldade: {op['difficulty_power']:,}\n"
             f"Chance estimada: {chance*100:.1f}%\n"
             f"Resultado simulado: **{outcome}**\n"
-            f"Registro: perdas estimadas {troops_lost:,} tropas | recompensa base {gold_delta:,} ouro\n"
+            f"Registro: perdas estimadas {troops_lost:,} tropas | recompensa base {gold_delta:,} ouro | prestígio +{prestige_gain:,}\n"
             f"{relic_line}\n"
             "Próximo: tente outra operação ou ajuste composição militar"
         ).replace(",", ".")

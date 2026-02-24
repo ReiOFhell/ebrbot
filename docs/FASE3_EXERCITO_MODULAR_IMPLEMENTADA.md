@@ -26,3 +26,17 @@ Sem requisitos, o comando retorna erro claro de requisito.
 
 ## Critério de pronto
 Mudança de doutrina e de slots altera `power` e impacta o resultado esperado da simulação (`!simular_operacao`).
+
+## Operações narrativas com requisito real
+- Operações agora seguem formato completo: requisitos, risco e recompensa prática.
+- Requisitos possíveis por operação:
+  - tier mínimo de Casernas;
+  - General equipado;
+  - Estrategista equipado (ou rota parcial quando permitido).
+- Recompensas de operação incluem:
+  - ouro base (com efeito de forja),
+  - prestígio sazonal (em `season_scores`),
+  - chance de sub-lore/achados via sistema emergente.
+- Gate elegante aplicado em `tumba_sultao`:
+  - requer Casernas T3+, General e Estrategista para rota completa;
+  - sem estrategista, operação segue com rota parcial (mais risco e menor recompensa).

@@ -261,6 +261,9 @@ def init_db() -> None:
         ensure_column(conn, "army", "strategist_id", "INTEGER")
         ensure_column(conn, "operations", "difficulty_power", "INTEGER NOT NULL DEFAULT 1000")
         ensure_column(conn, "operations", "preferred_doctrine", "TEXT")
+        ensure_column(conn, "operations", "requires_general", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "operations", "prestige_reward", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "operations", "partial_without_strategist", "INTEGER NOT NULL DEFAULT 0")
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_operation_runs_user ON operation_runs(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_generals_user ON generals(user_id)")
@@ -293,9 +296,37 @@ def init_db() -> None:
             """
         )
 
-        conn.execute("UPDATE operations SET difficulty_power = 2200, preferred_doctrine = 'furtivo' WHERE key = 'tumba_sultao'")
-        conn.execute("UPDATE operations SET difficulty_power = 3500, preferred_doctrine = 'cerco' WHERE key = 'ruinas_muralha'")
-        conn.execute("UPDATE operations SET difficulty_power = 1600, preferred_doctrine = 'choque' WHERE key = 'estrada_cinzas'")
+        conn.execute(
+            """
+            UPDATE operations
+            SET difficulty_power = 2200,
+                preferred_doctrine = 'furtivo',
+                requires_general = 1,
+                requires_strategist = 1,
+                partial_without_strategist = 1,
+                prestige_reward = 10
+            WHERE key = 'tumba_sultao'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE operations
+            SET difficulty_power = 3500,
+                preferred_doctrine = 'cerco',
+                requires_general = 1,
+                prestige_reward = 14
+            WHERE key = 'ruinas_muralha'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE operations
+            SET difficulty_power = 1600,
+                preferred_doctrine = 'choque',
+                prestige_reward = 6
+            WHERE key = 'estrada_cinzas'
+            """
+        )
 
         conn.commit()
 
@@ -686,8 +717,13 @@ def build_operacoes_embed(user_id: str, notice: str | None = None) -> discord.Em
         status = "✅ disponível"
         if d["barracks_level"] < op["min_barracks_level"]:
             status = f"🔒 Casernas T{op['min_barracks_level']}+"
+        elif op["requires_general"] and not d["general_id"]:
+            status = "🔒 requer general equipado"
         elif op["requires_strategist"] and not d["strategist_id"]:
-            status = "🔒 requer estrategista equipado"
+            if op["partial_without_strategist"]:
+                status = "⚠️ sem estrategista: apenas rota parcial"
+            else:
+                status = "🔒 requer estrategista equipado"
         lines.append(f"• `{op['key']}` — {status}")
 
     embed = discord.Embed(title="⚔️ Painel de Operações", color=discord.Color.dark_red())
