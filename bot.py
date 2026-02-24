@@ -343,6 +343,14 @@ def init_db() -> None:
         ensure_column(conn, "operations", "requires_arcane_general", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "operations", "required_legion_set_pieces", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "season_scores", "updated_at_ts", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "season_state", "decree_name", "TEXT")
+        ensure_column(conn, "season_state", "decree_description", "TEXT")
+        ensure_column(conn, "season_state", "decree_started_at_ts", "INTEGER")
+        ensure_column(conn, "season_state", "decree_ends_at_ts", "INTEGER")
+        ensure_column(conn, "season_state", "economy_pct", "REAL NOT NULL DEFAULT 0")
+        ensure_column(conn, "season_state", "operation_reward_pct", "REAL NOT NULL DEFAULT 0")
+        ensure_column(conn, "season_state", "operation_risk_pct", "REAL NOT NULL DEFAULT 0")
+        ensure_column(conn, "season_state", "prestige_pct", "REAL NOT NULL DEFAULT 0")
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_operation_runs_user ON operation_runs(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_generals_user ON generals(user_id)")
@@ -351,6 +359,20 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_panel_events_name ON panel_events(event_name)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_command_errors_ts ON command_errors(created_at_ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_discoveries_user ON discoveries_log(user_id)")
+
+        now = now_ts()
+        season_end = now + (30 * 24 * 3600)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO season_state (
+                id, season_number, started_at_ts, ends_at_ts, status,
+                decree_name, decree_description, decree_started_at_ts, decree_ends_at_ts,
+                economy_pct, operation_reward_pct, operation_risk_pct, prestige_pct
+            )
+            VALUES (1, 1, ?, ?, 'ativa', NULL, NULL, NULL, NULL, 0, 0, 0, 0)
+            """,
+            (now, season_end),
+        )
 
         # seeds mínimos
         conn.execute(
@@ -469,6 +491,44 @@ def log_command_error(user_id: str | None, command_name: str, error: Exception) 
             conn.commit()
     except Exception:
         logger.exception("Falha ao persistir command_errors")
+
+
+def get_global_modifiers() -> dict[str, float]:
+    now = now_ts()
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT economy_pct, operation_reward_pct, operation_risk_pct, prestige_pct,
+                   decree_name, decree_description, decree_started_at_ts, decree_ends_at_ts
+            FROM season_state
+            WHERE id = 1
+            """
+        ).fetchone()
+
+    if not row:
+        return {
+            "economy_pct": 0.0,
+            "operation_reward_pct": 0.0,
+            "operation_risk_pct": 0.0,
+            "prestige_pct": 0.0,
+        }
+
+    ends = row["decree_ends_at_ts"]
+    if ends is not None and now > int(ends):
+        # Decreto expirou: ignora efeito até soberano renovar
+        return {
+            "economy_pct": 0.0,
+            "operation_reward_pct": 0.0,
+            "operation_risk_pct": 0.0,
+            "prestige_pct": 0.0,
+        }
+
+    return {
+        "economy_pct": float(row["economy_pct"] or 0.0),
+        "operation_reward_pct": float(row["operation_reward_pct"] or 0.0),
+        "operation_risk_pct": float(row["operation_risk_pct"] or 0.0),
+        "prestige_pct": float(row["prestige_pct"] or 0.0),
+    }
 
 
 def resolve_discovery(user_id: str, source: str, forge_level: int) -> str:
@@ -675,6 +735,7 @@ gameplay = GameplayService(
     has_strategist_gate=has_strategist_gate,
     now_ts=now_ts,
     resolve_discovery=resolve_discovery,
+    get_global_modifiers=get_global_modifiers,
 )
 
 def do_collect(user_id: str) -> str:
@@ -734,6 +795,66 @@ def build_rank_embed() -> discord.Embed:
     embed = discord.Embed(title="🏛️ Rankings Imperiais", color=discord.Color.blurple())
     embed.add_field(name="Magnatas (Ouro)", value=fmt(rich, "gold"), inline=False)
     embed.add_field(name="Senhores de Guerra (Poder)", value=fmt(war, "power"), inline=False)
+    return embed
+
+
+def build_temporada_embed() -> discord.Embed:
+    now = now_ts()
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT season_number, started_at_ts, ends_at_ts, status,
+                   decree_name, decree_description, decree_started_at_ts, decree_ends_at_ts,
+                   economy_pct, operation_reward_pct, operation_risk_pct, prestige_pct
+            FROM season_state
+            WHERE id = 1
+            """
+        ).fetchone()
+
+    embed = discord.Embed(title="👑 Temporada Imperial", color=discord.Color.dark_magenta())
+    if not row:
+        embed.description = "Temporada não inicializada."
+        return embed
+
+    remaining = max(0, int(row["ends_at_ts"] or 0) - now)
+    remaining_h = remaining // 3600
+    embed.add_field(
+        name="Estado da temporada",
+        value=(
+            f"Temporada: **{row['season_number']}**\n"
+            f"Status: **{row['status']}**\n"
+            f"Tempo restante: **{remaining_h}h**"
+        ),
+        inline=False,
+    )
+
+    decree_name = row["decree_name"] or "Nenhum decreto ativo"
+    decree_desc = row["decree_description"] or "—"
+    decree_end = row["decree_ends_at_ts"]
+    decree_state = "expirado"
+    if decree_end and int(decree_end) >= now:
+        decree_state = f"ativo por {(int(decree_end) - now) // 3600}h"
+
+    embed.add_field(
+        name="Decreto soberano",
+        value=(
+            f"Nome: **{decree_name}**\n"
+            f"Descrição: {decree_desc}\n"
+            f"Estado: **{decree_state}**"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Impactos globais (moderados)",
+        value=(
+            f"Economia: **{float(row['economy_pct'] or 0.0)*100:+.1f}%**\n"
+            f"Recompensa operações: **{float(row['operation_reward_pct'] or 0.0)*100:+.1f}%**\n"
+            f"Risco operações: **{float(row['operation_risk_pct'] or 0.0)*100:+.1f}%**\n"
+            f"Prestígio: **{float(row['prestige_pct'] or 0.0)*100:+.1f}%**"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Transparência imperial: todo bônus/ônus tem prazo fixo")
     return embed
 
 
@@ -863,7 +984,13 @@ def build_operacoes_embed(user_id: str, notice: str | None = None) -> discord.Em
         ),
         inline=False,
     )
-    embed.set_footer(text="Operações usam barracks tier, tropas e slot de estrategista")
+    mods = get_global_modifiers()
+    embed.set_footer(
+        text=(
+            "Operações usam requisitos reais • "
+            f"decreto: recompensa {mods.get('operation_reward_pct', 0.0)*100:+.1f}% / risco {mods.get('operation_risk_pct', 0.0)*100:+.1f}%"
+        )
+    )
     return embed
 
 
@@ -1023,6 +1150,76 @@ async def rank(ctx: commands.Context) -> None:
     await ctx.send(embed=build_rank_embed())
 
 
+@bot.command(name="temporada")
+async def temporada(ctx: commands.Context) -> None:
+    await ctx.send(embed=build_temporada_embed())
+
+
+@bot.command(name="decreto_soberano", hidden=True)
+@commands.has_permissions(administrator=True)
+async def decreto_soberano(
+    ctx: commands.Context,
+    nome: str | None = None,
+    duracao_horas: int | None = None,
+    economia_pct: float = 0.0,
+    recompensa_ops_pct: float = 0.0,
+    risco_ops_pct: float = 0.0,
+    prestigio_pct: float = 0.0,
+) -> None:
+    if not nome or duracao_horas is None:
+        await ctx.send(
+            "Uso: `!decreto_soberano <nome> <duracao_horas> [economia_pct] [recompensa_ops_pct] [risco_ops_pct] [prestigio_pct]`\n"
+            "Exemplo: `!decreto_soberano Vigília_Rubra 24 0.05 0.08 0.04 0.03`"
+        )
+        return
+
+    if duracao_horas < 1 or duracao_horas > 72:
+        await ctx.send("❌ Duração inválida. Use entre 1h e 72h.")
+        return
+
+    # Limites moderados para não quebrar competitividade
+    for v, label in [
+        (economia_pct, "economia_pct"),
+        (recompensa_ops_pct, "recompensa_ops_pct"),
+        (risco_ops_pct, "risco_ops_pct"),
+        (prestigio_pct, "prestigio_pct"),
+    ]:
+        if v < -0.25 or v > 0.25:
+            await ctx.send(f"❌ `{label}` fora do limite moderado (-0.25 a +0.25).")
+            return
+
+    now = now_ts()
+    end_ts = now + duracao_horas * 3600
+    with get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE season_state
+            SET decree_name = ?, decree_description = ?,
+                decree_started_at_ts = ?, decree_ends_at_ts = ?,
+                economy_pct = ?, operation_reward_pct = ?, operation_risk_pct = ?, prestige_pct = ?
+            WHERE id = 1
+            """,
+            (
+                nome,
+                f"Decreto de {ctx.author.display_name}",
+                now,
+                end_ts,
+                economia_pct,
+                recompensa_ops_pct,
+                risco_ops_pct,
+                prestigio_pct,
+            ),
+        )
+        conn.commit()
+
+    await ctx.send(
+        f"<@{ctx.author.id}> ✅ Decreto soberano aplicado: **{nome}** por {duracao_horas}h\n"
+        f"Δ Economia {economia_pct*100:+.1f}% | Recompensa Ops {recompensa_ops_pct*100:+.1f}% | "
+        f"Risco Ops {risco_ops_pct*100:+.1f}% | Prestígio {prestigio_pct*100:+.1f}%\n"
+        "Próximo: use `!temporada` para transparência pública."
+    )
+
+
 @bot.command(name="economia_teste", hidden=True)
 @commands.has_permissions(administrator=True)
 async def economia_teste(ctx: commands.Context) -> None:
@@ -1115,8 +1312,16 @@ async def guia(ctx: commands.Context) -> None:
         inline=False,
     )
     embed.add_field(
+        name="Governança imperial",
+        value=(
+            "O soberano pode aplicar decretos temporários com impacto moderado.\n"
+            "Use `!temporada` para ver efeitos globais e duração."
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="Comandos admin",
-        value="`!diagnostico` • `!painel_kpis` • `!economia_teste`",
+        value="`!diagnostico` • `!painel_kpis` • `!economia_teste` • `!decreto_soberano`",
         inline=False,
     )
     embed.set_footer(text="Dica: se uma subview expirar, use o botão 🔄 Reabrir Painel")
@@ -1320,6 +1525,15 @@ async def diagnostico_error(ctx: commands.Context, error: commands.CommandError)
         return
     logger.exception("Erro em !diagnostico", exc_info=error)
     await ctx.send("Erro interno no diagnóstico.")
+
+
+@decreto_soberano.error
+async def decreto_soberano_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Apenas administradores podem usar `!decreto_soberano`.")
+        return
+    logger.exception("Erro em !decreto_soberano", exc_info=error)
+    await ctx.send("Erro interno no decreto soberano.")
 
 
 @bot.event

@@ -28,6 +28,7 @@ class GameplayService:
     has_strategist_gate: Callable[[sqlite3.Row, sqlite3.Connection], tuple[bool, str]]
     now_ts: Callable[[], int]
     resolve_discovery: Callable[[str, str, int], str]
+    get_global_modifiers: Callable[[], dict[str, float]]
 
     @staticmethod
     def _who(user_id: str) -> str:
@@ -46,7 +47,10 @@ class GameplayService:
             troops=d["troops"],
         )
 
-        gross_gain = int(snap.production_per_hour * (elapsed / 3600))
+        modifiers = self.get_global_modifiers()
+        eco_mult = max(0.5, 1.0 + float(modifiers.get("economy_pct", 0.0)))
+
+        gross_gain = int(snap.production_per_hour * (elapsed / 3600) * eco_mult)
         maintenance_cost = int(snap.total_maintenance_per_hour * (elapsed / 3600))
         net_gain = gross_gain - maintenance_cost
 
@@ -58,10 +62,14 @@ class GameplayService:
             accumulated_maintenance=d["accumulated_maintenance"] + max(0, maintenance_cost),
         )
 
+        decree_line = ""
+        if eco_mult != 1.0:
+            decree_line = f"\nDecreto imperial ativo: economia x{eco_mult:.2f}"
+
         return (
             f"{who} ✅ Coleta concluída.\n"
             f"Δ Ouro bruto: +{gross_gain:,} | Manutenção: -{maintenance_cost:,} | Líquido: {net_gain:+,}\n"
-            "Próximo: clique em **Treinar** ou abra **Construções**"
+            f"Próximo: clique em **Treinar** ou abra **Construções**{decree_line}"
         ).replace(",", ".")
 
     def do_train(self, user_id: str) -> str:
@@ -315,6 +323,11 @@ class GameplayService:
                 chance *= 0.55
 
         outcome = "vitória tática" if random.random() <= chance else "falha tática"
+        modifiers = self.get_global_modifiers()
+        reward_mult_global = max(0.5, 1.0 + float(modifiers.get("operation_reward_pct", 0.0)))
+        risk_mult_global = max(0.5, 1.0 + float(modifiers.get("operation_risk_pct", 0.0)))
+        prestige_mult_global = max(0.5, 1.0 + float(modifiers.get("prestige_pct", 0.0)))
+
         risk_mult = 1.0
         reward_mult = 1.0
         prestige_mult = 1.0
@@ -325,9 +338,9 @@ class GameplayService:
             prestige_mult = 0.35
             route_line = "Rota parcial: sem estrategista, retorno incompleto."
 
-        troops_lost = int(max(1, d["troops"] * opf["base_risk_percent"] * (0.4 if outcome == "vitória tática" else 0.8) * risk_mult))
-        base_gold_delta = int(opf["base_gold_reward"] * (1.0 if outcome == "vitória tática" else 0.2) * reward_mult)
-        prestige_gain = int(opf["prestige_reward"] * (1.0 if outcome == "vitória tática" else 0.4) * prestige_mult)
+        troops_lost = int(max(1, d["troops"] * opf["base_risk_percent"] * (0.4 if outcome == "vitória tática" else 0.8) * risk_mult * risk_mult_global))
+        base_gold_delta = int(opf["base_gold_reward"] * (1.0 if outcome == "vitória tática" else 0.2) * reward_mult * reward_mult_global)
+        prestige_gain = int(opf["prestige_reward"] * (1.0 if outcome == "vitória tática" else 0.4) * prestige_mult * prestige_mult_global)
         forge_mult = 1.0 + (d["forge_level"] - 1) * 0.03
         gold_delta = int(base_gold_delta * forge_mult)
 
@@ -353,6 +366,12 @@ class GameplayService:
 
         relic_line = self.resolve_discovery(user_id, f"operacao:{op['key']}", d["forge_level"])
 
+        decree_line = ""
+        if reward_mult_global != 1.0 or risk_mult_global != 1.0 or prestige_mult_global != 1.0:
+            decree_line = (
+                f"\nDecreto ativo: recompensa x{reward_mult_global:.2f} | risco x{risk_mult_global:.2f} | prestígio x{prestige_mult_global:.2f}"
+            )
+
         return (
             f"{who} 🧪 Simulação `{op['title']}`\n"
             f"{route_line}\n"
@@ -361,5 +380,5 @@ class GameplayService:
             f"Resultado simulado: **{outcome}**\n"
             f"Registro: perdas estimadas {troops_lost:,} tropas | recompensa base {gold_delta:,} ouro | prestígio +{prestige_gain:,}\n"
             f"{relic_line}\n"
-            "Próximo: tente outra operação ou ajuste composição militar"
+            f"Próximo: tente outra operação ou ajuste composição militar{decree_line}"
         ).replace(",", ".")
