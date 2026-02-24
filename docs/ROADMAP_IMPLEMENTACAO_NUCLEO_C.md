@@ -166,7 +166,7 @@ Cadastrar os 30 itens do pacote:
 - fonte: forja + operações;
 - pesos por raridade;
 - modificadores por tier/qualidade;
-- registro nos Anais.
+- registro nas Crônicas.
 
 ### 5.3 Lore emergente
 - descoberta gera mensagem dramática curta;
@@ -184,7 +184,7 @@ Cadastrar os 30 itens do pacote:
 Implementar e publicar:
 - Magnatas (riqueza)
 - Senhores de Guerra (poder)
-- Lendas dos Anais (prestígio)
+- Lendas das Crônicas (prestígio)
 
 ### 6.2 Temporada
 - duração 30 dias;
@@ -236,7 +236,7 @@ Registrar:
 2. **PR-02**: `!dominio` + coletar + melhorar + treinar.
 3. **PR-03**: exército modular (doutrina/general/estrategista).
 4. **PR-04**: 3 operações MVP + justiça competitiva.
-5. **PR-05**: sistema de achados + inventário + Anais.
+5. **PR-05**: sistema de achados + inventário + Crônicas.
 6. **PR-06**: rank triplo + temporada + premiação.
 7. **PR-07**: anti-exploit + métricas + tuning inicial.
 

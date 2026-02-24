@@ -67,7 +67,7 @@ Cada jogador tem 1 Feudo com 3 eixos estruturais. Isso evita excesso de menu e m
 
 ### 4.3 Prestígio (Legado)
 - Pontuação de temporada (não substitui ouro).
-- Define títulos, visibilidade, marca histórica nos Anais.
+- Define títulos, visibilidade, marca histórica nas Crônicas.
 
 **Resultado de design:**
 - Jogador A pode ser mais rico;
@@ -119,7 +119,7 @@ Camadas de achado:
 O jogador não precisa ver probabilidade exata. Ele vê:
 - descoberta dramática;
 - impacto prático;
-- registro nos Anais.
+- registro nas Crônicas.
 
 Isso evita sensação de cassino "seco" e aumenta memória emocional do drop.
 
@@ -161,7 +161,7 @@ Ações rápidas (botões ou subcomandos):
 - Melhorar
 - Treinar
 - Incursão
-- Achados/Anais
+- Achados/Crônicas
 - Rank
 
 **Filosofia:** um painel para tudo; profundidade nas camadas internas.
@@ -173,7 +173,7 @@ Ações rápidas (botões ou subcomandos):
 Três rankings paralelos:
 1. **Magnatas do Império** (riqueza)
 2. **Senhores de Guerra** (poder militar)
-3. **Lendas dos Anais** (prestígio de temporada)
+3. **Lendas das Crônicas** (prestígio de temporada)
 
 ### Temporadas (30 dias)
 - Soft reset de prestígio;

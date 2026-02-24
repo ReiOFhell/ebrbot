@@ -27,7 +27,7 @@ Implementação aplicada no núcleo do bot com foco em clareza:
 ## Sistema de Achados & Relíquias (sub-lore emergente)
 - A lore não aparece no `!guia`; ela surge por descoberta em `!forjar` e nas operações.
 - Camadas de achado implementadas por raridade:
-  - **Fragmento (comum)**: pista curta + registro em anais.
+  - **Fragmento (comum)**: pista curta + registro em cronicas.
   - **Relíquia (raro)**: item com micro-lore e impacto prático.
   - **Entidade (lendário)**: classes de raridade altas (`SS`, `SSS`, `SSS+`, `99999`) com registro dramático.
-- Registros persistidos em `discoveries_log` e inventário (`inventories`) com comando `!anais` (oculto) para auditoria narrativa.
+- Registros persistidos em `discoveries_log` e inventário (`inventories`) com comando `!cronicas` (oculto) para auditoria narrativa.

@@ -389,7 +389,7 @@ def resolve_discovery(user_id: str, source: str, forge_level: int) -> str:
             "SS": "+1% poder temporário narrativo",
             "SSS": "+2% poder temporário narrativo",
             "SSS+": "+3% poder temporário narrativo",
-            "99999": "registro lendário permanente nos Anais",
+            "99999": "registro lendário permanente nas Crônicas",
         }.get(rarity, "eco narrativo")
 
         fragment = f"{item['name']}: {item['lore']}"
@@ -405,7 +405,7 @@ def resolve_discovery(user_id: str, source: str, forge_level: int) -> str:
     return (
         f"📜 Descoberta: **{item['name']}** [{rarity}]\n"
         f"Impacto: {impact}\n"
-        f"Registro nos Anais: {fragment}"
+        f"Registro nas Crônicas: {fragment}"
     )
 
 
@@ -861,8 +861,8 @@ async def forjar(ctx: commands.Context) -> None:
     )
 
 
-@bot.command(name="anais", hidden=True)
-async def anais(ctx: commands.Context) -> None:
+@bot.command(name="cronicas", hidden=True)
+async def cronicas(ctx: commands.Context) -> None:
     user_id = str(ctx.author.id)
     with get_conn() as conn:
         rows = conn.execute(
@@ -877,7 +877,7 @@ async def anais(ctx: commands.Context) -> None:
         ).fetchall()
 
     if not rows:
-        await ctx.send("Nenhum registro encontrado nos Anais. A lore ainda não te encontrou.")
+        await ctx.send("Nenhum registro encontrado nas Crônicas. A lore ainda não te encontrou.")
         return
 
     lines = []
@@ -886,7 +886,7 @@ async def anais(ctx: commands.Context) -> None:
             f"• [{r['rarity']}] {r['fragment_text']}\n"
             f"  ↳ Impacto: {r['impact_text']}"
         )
-    await ctx.send("📖 Anais de Descobertas\n" + "\n".join(lines))
+    await ctx.send("📖 Crônicas de Descobertas\n" + "\n".join(lines))
 
 
 
@@ -965,7 +965,7 @@ async def guia(ctx: commands.Context) -> None:
             "`!recrutar_general <nome>` • `!equipar_general <id>`\n"
             "`!recrutar_estrategista <nome>` • `!equipar_estrategista <id>`\n"
             "`!simular_operacao <tumba_sultao|ruinas_muralha|estrada_cinzas>`\n"
-            "`!forjar` • `!anais`"
+            "`!forjar` • `!cronicas`"
         ),
         inline=False,
     )

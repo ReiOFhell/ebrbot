@@ -90,7 +90,7 @@ Cada clique responde com:
 
 ### 3.3 Prestígio (Legado)
 - Pontuação de temporada (não substitui ouro).
-- Função: títulos, visibilidade e marca nos Anais.
+- Função: títulos, visibilidade e marca nas Crônicas.
 - Medida principal: ranking sazonal em `season_scores`.
 
 ### Resultado de design (ambição múltipla)

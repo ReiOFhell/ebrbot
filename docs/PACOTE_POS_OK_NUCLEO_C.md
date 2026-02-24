@@ -135,7 +135,7 @@ Racional:
 | Estandarte da Primeira Ruptura | L | Evento temporada | "Erguido antes da era escrita." | +20% poder em guerra sazonal |
 | Olho de Obsidiana Primordial | Mítica | Poço profundo | "Vê o que nunca existiu." | Libera operação secreta |
 | Coração da Muralha Viva | L | Ruínas avançadas | "A pedra ainda escolhe lados." | Set Basalto bônus final (5/5) |
-| Fragmento do Pacto Primordial | Mítica | Achado ultrarraro | "Não foi assinado por humanos." | Marca de Anais + título único |
+| Fragmento do Pacto Primordial | Mítica | Achado ultrarraro | "Não foi assinado por humanos." | Marca de Crônicas + título único |
 
 ### 3.4 Escala de raridade padrão
 - Comum (C): ~6% por tentativa útil
@@ -203,8 +203,8 @@ Formato curto padrão:
 - "Achado: **Insígnia da Sétima Caravana**."
 - "Próximo: `Equipar General` ou `Rank`."
 
-### `Achados/Anais`
-- "📜 Novo fragmento registrado nos Anais."
+### `Achados/Crônicas`
+- "📜 Novo fragmento registrado nas Crônicas."
 - "Item: Fragmento do Pacto Primordial (incompleto 1/3)."
 - "Próximo: `Poço dos Nomes Perdidos` (requisito já cumprido)."
 
