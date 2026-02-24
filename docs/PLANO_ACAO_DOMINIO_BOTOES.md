@@ -15,6 +15,12 @@ Ter **1 entrada central** (`!dominio`) que permita jogar o núcleo inteiro sem d
 - queda de erros por comando inválido;
 - sensação de progresso mais clara por clique.
 
+### Indicadores de sucesso (Norte do produto)
+- ≥ 70% dos jogadores ativos usando `!dominio` como entrada principal.
+- ≤ 15% de mensagens de erro por uso incorreto de comando.
+- ≥ 2,5 ações médias por sessão de painel.
+- aumento de retenção D1/D7 após migração para clique-first.
+
 ---
 
 ## 2) Escopo funcional do painel
@@ -42,6 +48,32 @@ Cada clique responde com:
 3. próximo clique sugerido.
 
 ---
+
+
+
+## 3.1 Progressão em 3 eixos (poder evidente entre X e Y)
+
+### 3.1 Riqueza (Ouro)
+- Escala longa: milhões → bilhões → trilhões.
+- Função: upgrades, manutenção militar e mercado.
+- Medida principal: `resources.gold` + patrimônio de progressão.
+
+### 3.2 Poder (Força do Feudo)
+- Fórmula conceitual: Tropas + Qualidade de General + Equipamento de Legião + bônus de doutrina.
+- Função: capacidade real de vitória em operações.
+- Medida principal: `army.power` (composição + doutrina + slots).
+
+### 3.3 Prestígio (Legado)
+- Pontuação de temporada (não substitui ouro).
+- Função: títulos, visibilidade e marca nos Anais.
+- Medida principal: ranking sazonal em `season_scores`.
+
+### Resultado de design (ambição múltipla)
+- Jogador A pode liderar em riqueza;
+- Jogador B pode liderar em poder militar;
+- Jogador C pode liderar em prestígio.
+
+Isso evita meta única e aumenta disputa saudável.
 
 ## 3) Backlog por etapas (execução)
 
