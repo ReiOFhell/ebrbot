@@ -18,6 +18,7 @@ class PanelDeps:
     get_conn: Callable[[], Any]
     get_or_create_domain: Callable[[str], Any]
     log_panel_event: Callable[..., None]
+    log_command_error: Callable[[str | None, str, Exception], None]
 
 
 class ActionGuard:
@@ -298,6 +299,7 @@ class OperationSelect(discord.ui.Select):
                 view=OperacoesView(author_id=interaction.user.id, deps=self.deps),
             )
         except Exception as exc:
+            self.deps.log_command_error(user_id, f"operacao_select:{value}", exc)
             self.deps.log_panel_event(
                 user_id=user_id,
                 guild_id=guild_id,

@@ -1005,6 +1005,7 @@ def build_panel_deps() -> PanelDeps:
         get_conn=get_conn,
         get_or_create_domain=get_or_create_domain,
         log_panel_event=log_panel_event,
+        log_command_error=log_command_error,
     )
 
 
