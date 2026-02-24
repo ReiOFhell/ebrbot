@@ -201,16 +201,16 @@ Acompanhar por semana:
 ## 6) Riscos e mitigação
 
 1. **View expira rápido**
-   - Mitigar com botão “Reabrir Painel”.
+   - Mitigar com botão “Reabrir Painel”. ✅ Implementado nas subviews.
 
 2. **Spam de clique**
-   - Cooldown leve por ação + lock por usuário/ação.
+   - Cooldown leve por ação + lock por usuário/ação. ✅ Implementado em `DominioView`.
 
 3. **Painel ficar lotado**
    - Máximo 6 botões por tela + subviews.
 
 4. **Regra divergir entre botão e comando**
-   - Centralizar lógica em serviços únicos.
+   - Centralizar lógica em serviços únicos. ✅ Implementado via `GameplayService`.
 
 ---
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any, Callable
 
 import discord
@@ -17,6 +18,28 @@ class PanelDeps:
     get_conn: Callable[[], Any]
     get_or_create_domain: Callable[[str], Any]
     log_panel_event: Callable[..., None]
+
+
+class ActionGuard:
+    _inflight: set[tuple[str, str]] = set()
+    _last_ts: dict[tuple[str, str], float] = {}
+
+    @classmethod
+    def try_enter(cls, user_id: str, action: str, cooldown_s: float = 1.0) -> tuple[bool, str | None]:
+        key = (user_id, action)
+        if key in cls._inflight:
+            return False, "Ação em andamento"
+        now = time.time()
+        last = cls._last_ts.get(key)
+        if last is not None and now - last < cooldown_s:
+            return False, "Cooldown"
+        cls._inflight.add(key)
+        cls._last_ts[key] = now
+        return True, None
+
+    @classmethod
+    def leave(cls, user_id: str, action: str) -> None:
+        cls._inflight.discard((user_id, action))
 
 
 class ConstrucoesView(discord.ui.View):
@@ -41,6 +64,13 @@ class ConstrucoesView(discord.ui.View):
         await interaction.response.edit_message(
             embed=self.deps.build_construcoes_embed(str(interaction.user.id), None),
             view=ConstrucoesUpgradeView(author_id=interaction.user.id, deps=self.deps),
+        )
+
+    @discord.ui.button(label="🔄 Reabrir Painel", style=discord.ButtonStyle.secondary)
+    async def btn_reabrir(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=self.deps.build_dominio_embed(str(interaction.user.id)),
+            view=DominioView(author_id=interaction.user.id, deps=self.deps),
         )
 
 
@@ -82,6 +112,13 @@ class ConstrucoesUpgradeView(discord.ui.View):
         await interaction.response.edit_message(
             embed=self.deps.build_construcoes_embed(str(interaction.user.id), None),
             view=ConstrucoesView(author_id=interaction.user.id, deps=self.deps),
+        )
+
+    @discord.ui.button(label="🔄 Reabrir Painel", style=discord.ButtonStyle.secondary)
+    async def btn_reabrir(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=self.deps.build_dominio_embed(str(interaction.user.id)),
+            view=DominioView(author_id=interaction.user.id, deps=self.deps),
         )
 
 
@@ -195,6 +232,13 @@ class MilitarView(discord.ui.View):
             view=DominioView(author_id=interaction.user.id, deps=self.deps),
         )
 
+    @discord.ui.button(label="🔄 Reabrir Painel", style=discord.ButtonStyle.secondary)
+    async def btn_reabrir(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=self.deps.build_dominio_embed(str(interaction.user.id)),
+            view=DominioView(author_id=interaction.user.id, deps=self.deps),
+        )
+
 
 class OperationSelect(discord.ui.Select):
     def __init__(self, user_id: str, deps: PanelDeps) -> None:
@@ -246,6 +290,13 @@ class OperacoesView(discord.ui.View):
             view=DominioView(author_id=interaction.user.id, deps=self.deps),
         )
 
+    @discord.ui.button(label="🔄 Reabrir Painel", style=discord.ButtonStyle.secondary)
+    async def btn_reabrir(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=self.deps.build_dominio_embed(str(interaction.user.id)),
+            view=DominioView(author_id=interaction.user.id, deps=self.deps),
+        )
+
 
 class DominioView(discord.ui.View):
     def __init__(self, author_id: int, deps: PanelDeps):
@@ -287,70 +338,124 @@ class DominioView(discord.ui.View):
                 error_code=error_code,
             )
 
+    def _guard(self, *, user_id: str, guild_id: str | None, action: str, cooldown_s: float) -> tuple[bool, str | None]:
+        ok, reason = ActionGuard.try_enter(user_id, action, cooldown_s=cooldown_s)
+        if not ok:
+            self.deps.log_panel_event(
+                user_id=user_id,
+                guild_id=guild_id,
+                event_name="panel_error",
+                event_action=action,
+                error_code="action_lock" if reason == "Ação em andamento" else "cooldown",
+            )
+            return False, reason
+        return True, None
+
     @discord.ui.button(label="Resgatar", style=discord.ButtonStyle.success)
     async def btn_resgatar(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        user_id = str(interaction.user.id)
+        guild_id = str(interaction.guild_id) if interaction.guild_id else None
+        ok, reason = self._guard(user_id=user_id, guild_id=guild_id, action="resgatar", cooldown_s=1.5)
+        if not ok:
+            await interaction.response.send_message(f"❌ {reason}. Aguarde e tente novamente.", ephemeral=True)
+            return
         msg = self.deps.service.do_collect(str(interaction.user.id))
         self._log_action_result(
-            user_id=str(interaction.user.id),
-            guild_id=str(interaction.guild_id) if interaction.guild_id else None,
+            user_id=user_id,
+            guild_id=guild_id,
             action="resgatar",
             message=msg,
         )
         await interaction.response.send_message(msg, ephemeral=True)
+        ActionGuard.leave(user_id, "resgatar")
 
     @discord.ui.button(label="Treinar", style=discord.ButtonStyle.primary)
     async def btn_treinar(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        user_id = str(interaction.user.id)
+        guild_id = str(interaction.guild_id) if interaction.guild_id else None
+        ok, reason = self._guard(user_id=user_id, guild_id=guild_id, action="treinar", cooldown_s=1.5)
+        if not ok:
+            await interaction.response.send_message(f"❌ {reason}. Aguarde e tente novamente.", ephemeral=True)
+            return
         msg = self.deps.service.do_train(str(interaction.user.id))
         self._log_action_result(
-            user_id=str(interaction.user.id),
-            guild_id=str(interaction.guild_id) if interaction.guild_id else None,
+            user_id=user_id,
+            guild_id=guild_id,
             action="treinar",
             message=msg,
         )
         await interaction.response.send_message(msg, ephemeral=True)
+        ActionGuard.leave(user_id, "treinar")
 
     @discord.ui.button(label="Construções", style=discord.ButtonStyle.secondary)
     async def btn_construcoes(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        user_id = str(interaction.user.id)
+        guild_id = str(interaction.guild_id) if interaction.guild_id else None
+        ok, reason = self._guard(user_id=user_id, guild_id=guild_id, action="construcoes", cooldown_s=0.75)
+        if not ok:
+            await interaction.response.send_message(f"❌ {reason}. Aguarde e tente novamente.", ephemeral=True)
+            return
         self.deps.log_panel_event(
-            user_id=str(interaction.user.id),
-            guild_id=str(interaction.guild_id) if interaction.guild_id else None,
+            user_id=user_id,
+            guild_id=guild_id,
             event_name="panel_action",
             event_action="construcoes",
         )
-        embed = self.deps.build_construcoes_embed(str(interaction.user.id), None)
+        embed = self.deps.build_construcoes_embed(user_id, None)
         await interaction.response.edit_message(embed=embed, view=ConstrucoesView(author_id=interaction.user.id, deps=self.deps))
+        ActionGuard.leave(user_id, "construcoes")
 
     @discord.ui.button(label="Militar", style=discord.ButtonStyle.secondary)
     async def btn_militar(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        user_id = str(interaction.user.id)
+        guild_id = str(interaction.guild_id) if interaction.guild_id else None
+        ok, reason = self._guard(user_id=user_id, guild_id=guild_id, action="militar", cooldown_s=0.75)
+        if not ok:
+            await interaction.response.send_message(f"❌ {reason}. Aguarde e tente novamente.", ephemeral=True)
+            return
         self.deps.log_panel_event(
-            user_id=str(interaction.user.id),
-            guild_id=str(interaction.guild_id) if interaction.guild_id else None,
+            user_id=user_id,
+            guild_id=guild_id,
             event_name="panel_action",
             event_action="militar",
         )
         await interaction.response.edit_message(
-            embed=self.deps.build_militar_embed(str(interaction.user.id), None),
+            embed=self.deps.build_militar_embed(user_id, None),
             view=MilitarView(author_id=interaction.user.id, deps=self.deps),
         )
+        ActionGuard.leave(user_id, "militar")
 
     @discord.ui.button(label="Operações", style=discord.ButtonStyle.secondary)
     async def btn_operacoes(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        user_id = str(interaction.user.id)
+        guild_id = str(interaction.guild_id) if interaction.guild_id else None
+        ok, reason = self._guard(user_id=user_id, guild_id=guild_id, action="operacoes", cooldown_s=0.75)
+        if not ok:
+            await interaction.response.send_message(f"❌ {reason}. Aguarde e tente novamente.", ephemeral=True)
+            return
         self.deps.log_panel_event(
-            user_id=str(interaction.user.id),
-            guild_id=str(interaction.guild_id) if interaction.guild_id else None,
+            user_id=user_id,
+            guild_id=guild_id,
             event_name="panel_action",
             event_action="operacoes",
         )
         await interaction.response.edit_message(
-            embed=self.deps.build_operacoes_embed(str(interaction.user.id), None),
+            embed=self.deps.build_operacoes_embed(user_id, None),
             view=OperacoesView(author_id=interaction.user.id, deps=self.deps),
         )
+        ActionGuard.leave(user_id, "operacoes")
 
     @discord.ui.button(label="Rank", style=discord.ButtonStyle.secondary)
     async def btn_rank(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        user_id = str(interaction.user.id)
+        guild_id = str(interaction.guild_id) if interaction.guild_id else None
+        ok, reason = self._guard(user_id=user_id, guild_id=guild_id, action="rank", cooldown_s=0.75)
+        if not ok:
+            await interaction.response.send_message(f"❌ {reason}. Aguarde e tente novamente.", ephemeral=True)
+            return
         self.deps.log_panel_event(
-            user_id=str(interaction.user.id),
-            guild_id=str(interaction.guild_id) if interaction.guild_id else None,
+            user_id=user_id,
+            guild_id=guild_id,
             event_name="panel_action",
             event_action="rank",
         )
@@ -359,3 +464,4 @@ class DominioView(discord.ui.View):
             embed=self.deps.build_rank_embed(),
             ephemeral=True,
         )
+        ActionGuard.leave(user_id, "rank")
