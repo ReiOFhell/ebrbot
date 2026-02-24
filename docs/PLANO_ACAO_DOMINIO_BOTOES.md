@@ -21,6 +21,8 @@ Ter **1 entrada central** (`!dominio`) que permita jogar o núcleo inteiro sem d
 - ≥ 2,5 ações médias por sessão de painel.
 - aumento de retenção D1/D7 após migração para clique-first.
 
+Referência operacional detalhada: `docs/NORTE_PRODUTO_KPIS_OPERACIONAL.md`.
+
 
 
 ## 1.1 Quadro executivo do Norte (para acompanhamento semanal)
