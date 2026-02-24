@@ -391,6 +391,154 @@ def update_player_state(user_id: str, *, gold: int | None = None, last_collect_t
         conn.commit()
 
 
+def action_feedback(title: str, delta_line: str, next_step: str) -> str:
+    return f"✅ {title}\nΔ {delta_line}\nPróximo: {next_step}"
+
+
+def do_collect(user_id: str) -> str:
+    d = get_or_create_domain(user_id)
+    now = now_ts()
+    elapsed = effective_collect_seconds(now - d["last_collect_ts"])
+
+    snap = economy_snapshot(
+        barn_level=d["barn_level"],
+        barracks_level=d["barracks_level"],
+        forge_level=d["forge_level"],
+        troops=d["troops"],
+    )
+
+    gross_gain = int(snap.production_per_hour * (elapsed / 3600))
+    maintenance_cost = int(snap.total_maintenance_per_hour * (elapsed / 3600))
+    net_gain = gross_gain - maintenance_cost
+
+    new_gold = max(0, d["gold"] + net_gain)
+    update_player_state(
+        user_id,
+        gold=new_gold,
+        last_collect_ts=now,
+        accumulated_maintenance=d["accumulated_maintenance"] + max(0, maintenance_cost),
+    )
+
+    return (
+        "✅ Coleta concluída.\n"
+        f"Δ Ouro bruto: +{gross_gain:,} | Manutenção: -{maintenance_cost:,} | Líquido: {net_gain:+,}\n"
+        "Próximo: clique em **Treinar** ou abra **Construções**"
+    ).replace(",", ".")
+
+
+def do_train(user_id: str) -> str:
+    d = get_or_create_domain(user_id)
+    now = now_ts()
+    delta = now - d["last_train_ts"]
+    if delta < TRAIN_COOLDOWN_SECONDS:
+        rest = TRAIN_COOLDOWN_SECONDS - delta
+        return f"❌ Treino indisponível\nΔ Cooldown restante: {max(1, rest // 60)} min\nPróximo: aguarde e clique novamente"
+
+    troops_gain = barracks_train_amount(d["barracks_level"])
+    new_troops = d["troops"] + troops_gain
+    with get_conn() as conn:
+        g_bonus, s_bonus = get_slot_bonuses(conn, d["general_id"], d["strategist_id"])
+    new_power = recalc_power(new_troops, d["barracks_level"], d["forge_level"], d["doctrine"], g_bonus, s_bonus)
+    update_player_state(user_id, troops=new_troops, power=new_power, last_train_ts=now)
+
+    return (
+        "✅ Treino concluído.\n"
+        f"Δ Tropas: +{troops_gain:,} | Poder: {new_power:,}\n"
+        "Próximo: clique em **Operações** ou **Rank**"
+    ).replace(",", ".")
+
+
+def build_rank_embed() -> discord.Embed:
+    with get_conn() as conn:
+        rich = conn.execute(
+            "SELECT d.user_id, r.gold FROM domains d JOIN resources r ON r.user_id=d.user_id ORDER BY r.gold DESC LIMIT 5"
+        ).fetchall()
+        war = conn.execute(
+            "SELECT d.user_id, a.power FROM domains d JOIN army a ON a.user_id=d.user_id ORDER BY a.power DESC LIMIT 5"
+        ).fetchall()
+
+    def fmt(rows: list[sqlite3.Row], metric: str) -> str:
+        if not rows:
+            return "Sem dados."
+        return "\n".join(f"{i}. <@{r['user_id']}> — {r[metric]:,}".replace(",", ".") for i, r in enumerate(rows, start=1))
+
+    embed = discord.Embed(title="🏛️ Rankings Imperiais", color=discord.Color.blurple())
+    embed.add_field(name="Magnatas (Ouro)", value=fmt(rich, "gold"), inline=False)
+    embed.add_field(name="Senhores de Guerra (Poder)", value=fmt(war, "power"), inline=False)
+    return embed
+
+
+class DominioView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=180)
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Apenas o dono do painel pode usar estes botões.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Resgatar", style=discord.ButtonStyle.success)
+    async def btn_resgatar(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        msg = do_collect(str(interaction.user.id))
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @discord.ui.button(label="Treinar", style=discord.ButtonStyle.primary)
+    async def btn_treinar(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        msg = do_train(str(interaction.user.id))
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @discord.ui.button(label="Construções", style=discord.ButtonStyle.secondary)
+    async def btn_construcoes(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        d = get_or_create_domain(str(interaction.user.id))
+        await interaction.response.send_message(
+            (
+                "✅ Painel de construções aberto.\n"
+                f"Δ Celeiros T{d['barn_level']} | Casernas T{d['barracks_level']} | Forja T{d['forge_level']}\n"
+                "Próximo: use `!melhorar <celeiros|casernas|forja>`"
+            ),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Militar", style=discord.ButtonStyle.secondary)
+    async def btn_militar(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        d = get_or_create_domain(str(interaction.user.id))
+        await interaction.response.send_message(
+            (
+                "✅ Painel militar aberto.\n"
+                f"Δ Doutrina: {d['doctrine']} | General: {d['general_id'] or 'vazio'} | Estrategista: {d['strategist_id'] or 'vazio'}\n"
+                "Próximo: use `!doutrina` / `!equipar_general` / `!equipar_estrategista`"
+            ),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Operações", style=discord.ButtonStyle.secondary)
+    async def btn_operacoes(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        with get_conn() as conn:
+            ops = conn.execute("SELECT key, title, min_barracks_level, requires_strategist FROM operations ORDER BY id").fetchall()
+        d = get_or_create_domain(str(interaction.user.id))
+        lines = []
+        for op in ops:
+            reason = "OK"
+            if d["barracks_level"] < op["min_barracks_level"]:
+                reason = f"Requer Casernas T{op['min_barracks_level']}+"
+            elif op["requires_strategist"] and not d["strategist_id"]:
+                reason = "Requer estrategista equipado"
+            lines.append(f"• `{op['key']}` — {reason}")
+        await interaction.response.send_message(
+            "✅ Painel de operações aberto.\n"
+            f"Δ Operações mapeadas: {len(lines)}\n"
+            "\n".join(lines)
+            + "\nPróximo: use `!simular_operacao <key>`",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Rank", style=discord.ButtonStyle.secondary)
+    async def btn_rank(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.send_message(embed=build_rank_embed(), ephemeral=True)
+
+
 @bot.command(name="dominio")
 async def dominio(ctx: commands.Context) -> None:
     d = get_or_create_domain(str(ctx.author.id))
@@ -421,76 +569,18 @@ async def dominio(ctx: commands.Context) -> None:
         inline=False,
     )
     embed.add_field(name="Militar", value=(f"👥 Tropas: **{d['troops']:,}**\n⚔️ Poder: **{d['power']:,}**\n🧭 Doutrina: **{d['doctrine']}**\n🎖️ General slot: **{d['general_id'] or 'vazio'}**\n📐 Estrategista slot: **{d['strategist_id'] or 'vazio'}**").replace(",", "."), inline=False)
-    embed.set_footer(text="Ações: !coletar • !treinar • !melhorar <celeiros|casernas|forja> • !forjar • !simular_operacao • !rank")
-    await ctx.send(embed=embed)
+    embed.set_footer(text="Botões: Resgatar • Treinar • Construções • Militar • Operações • Rank")
+    await ctx.send(embed=embed, view=DominioView(author_id=ctx.author.id))
 
 
 @bot.command(name="coletar")
 async def coletar(ctx: commands.Context) -> None:
-    user_id = str(ctx.author.id)
-    d = get_or_create_domain(user_id)
-    now = now_ts()
-    elapsed = effective_collect_seconds(now - d["last_collect_ts"])
-
-    snap = economy_snapshot(
-        barn_level=d["barn_level"],
-        barracks_level=d["barracks_level"],
-        forge_level=d["forge_level"],
-        troops=d["troops"],
-    )
-
-    gross_gain = int(snap.production_per_hour * (elapsed / 3600))
-    maintenance_cost = int(snap.total_maintenance_per_hour * (elapsed / 3600))
-    net_gain = gross_gain - maintenance_cost
-
-    new_gold = d["gold"] + net_gain
-    if new_gold < 0:
-        new_gold = 0
-    update_player_state(
-        user_id,
-        gold=new_gold,
-        last_collect_ts=now,
-        accumulated_maintenance=d["accumulated_maintenance"] + max(0, maintenance_cost),
-    )
-
-    await ctx.send(
-        (
-            "✅ Coleta concluída.\n"
-            f"Δ Ouro bruto: +{gross_gain:,}\n"
-            f"Δ Manutenção: -{maintenance_cost:,}\n"
-            f"Δ Líquido: {net_gain:+,}\n"
-            f"Saldo: {new_gold:,}\n"
-            "Próximo: `!melhorar celeiros` ou `!treinar`"
-        ).replace(",", ".")
-    )
+    await ctx.send(do_collect(str(ctx.author.id)))
 
 
 @bot.command(name="treinar")
 async def treinar(ctx: commands.Context) -> None:
-    user_id = str(ctx.author.id)
-    d = get_or_create_domain(user_id)
-    now = now_ts()
-    delta = now - d["last_train_ts"]
-    if delta < TRAIN_COOLDOWN_SECONDS:
-        rest = TRAIN_COOLDOWN_SECONDS - delta
-        await ctx.send(f"⏳ Casernas em cooldown. Tenta novamente em {max(1, rest // 60)} min.")
-        return
-
-    troops_gain = barracks_train_amount(d["barracks_level"])
-    new_troops = d["troops"] + troops_gain
-    with get_conn() as conn:
-        g_bonus, s_bonus = get_slot_bonuses(conn, d["general_id"], d["strategist_id"])
-    new_power = recalc_power(new_troops, d["barracks_level"], d["forge_level"], d["doctrine"], g_bonus, s_bonus)
-    update_player_state(user_id, troops=new_troops, power=new_power, last_train_ts=now)
-
-    await ctx.send(
-        (
-            "✅ Treino concluído.\n"
-            f"Δ Tropas: +{troops_gain:,}\n"
-            f"⚔️ Poder atual: {new_power:,}\n"
-            "Próximo: `!rank` ou `!melhorar casernas`"
-        ).replace(",", ".")
-    )
+    await ctx.send(do_train(str(ctx.author.id)))
 
 
 @bot.command(name="melhorar")
@@ -731,23 +821,7 @@ async def forjar(ctx: commands.Context) -> None:
 
 @bot.command(name="rank")
 async def rank(ctx: commands.Context) -> None:
-    with get_conn() as conn:
-        rich = conn.execute(
-            "SELECT d.user_id, r.gold FROM domains d JOIN resources r ON r.user_id=d.user_id ORDER BY r.gold DESC LIMIT 5"
-        ).fetchall()
-        war = conn.execute(
-            "SELECT d.user_id, a.power FROM domains d JOIN army a ON a.user_id=d.user_id ORDER BY a.power DESC LIMIT 5"
-        ).fetchall()
-
-    def fmt(rows: list[sqlite3.Row], metric: str) -> str:
-        if not rows:
-            return "Sem dados."
-        return "\n".join(f"{i}. <@{r['user_id']}> — {r[metric]:,}".replace(",", ".") for i, r in enumerate(rows, start=1))
-
-    embed = discord.Embed(title="🏛️ Rankings Imperiais", color=discord.Color.blurple())
-    embed.add_field(name="Magnatas (Ouro)", value=fmt(rich, "gold"), inline=False)
-    embed.add_field(name="Senhores de Guerra (Poder)", value=fmt(war, "power"), inline=False)
-    await ctx.send(embed=embed)
+    await ctx.send(embed=build_rank_embed())
 
 
 @bot.command(name="economia_teste")
