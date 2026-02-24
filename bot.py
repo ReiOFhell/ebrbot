@@ -237,6 +237,7 @@ def init_db() -> None:
                 prestige INTEGER NOT NULL DEFAULT 0,
                 wealth_snapshot INTEGER NOT NULL DEFAULT 0,
                 power_snapshot INTEGER NOT NULL DEFAULT 0,
+                updated_at_ts INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(season_number, user_id),
                 FOREIGN KEY(user_id) REFERENCES domains(user_id)
             )
@@ -264,6 +265,7 @@ def init_db() -> None:
         ensure_column(conn, "operations", "requires_general", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "operations", "prestige_reward", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "operations", "partial_without_strategist", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "season_scores", "updated_at_ts", "INTEGER NOT NULL DEFAULT 0")
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_operation_runs_user ON operation_runs(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_generals_user ON generals(user_id)")
