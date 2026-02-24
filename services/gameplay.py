@@ -29,7 +29,12 @@ class GameplayService:
     now_ts: Callable[[], int]
     resolve_discovery: Callable[[str, str, int], str]
 
+    @staticmethod
+    def _who(user_id: str) -> str:
+        return f"<@{user_id}>"
+
     def do_collect(self, user_id: str) -> str:
+        who = self._who(user_id)
         d = self.get_or_create_domain(user_id)
         now = self.now_ts()
         elapsed = effective_collect_seconds(now - d["last_collect_ts"])
@@ -54,18 +59,19 @@ class GameplayService:
         )
 
         return (
-            "✅ Coleta concluída.\n"
+            f"{who} ✅ Coleta concluída.\n"
             f"Δ Ouro bruto: +{gross_gain:,} | Manutenção: -{maintenance_cost:,} | Líquido: {net_gain:+,}\n"
             "Próximo: clique em **Treinar** ou abra **Construções**"
         ).replace(",", ".")
 
     def do_train(self, user_id: str) -> str:
+        who = self._who(user_id)
         d = self.get_or_create_domain(user_id)
         now = self.now_ts()
         delta = now - d["last_train_ts"]
         if delta < TRAIN_COOLDOWN_SECONDS:
             rest = TRAIN_COOLDOWN_SECONDS - delta
-            return f"❌ Treino indisponível\nΔ Cooldown restante: {max(1, rest // 60)} min\nPróximo: aguarde e clique novamente"
+            return f"{who} ❌ Treino indisponível\nΔ Cooldown restante: {max(1, rest // 60)} min\nPróximo: aguarde e clique novamente"
 
         troops_gain = barracks_train_amount(d["barracks_level"])
         new_troops = d["troops"] + troops_gain
@@ -75,25 +81,26 @@ class GameplayService:
         self.update_player_state(user_id, troops=new_troops, power=new_power, last_train_ts=now)
 
         return (
-            "✅ Treino concluído.\n"
+            f"{who} ✅ Treino concluído.\n"
             f"Δ Tropas: +{troops_gain:,} | Poder: {new_power:,}\n"
             "Próximo: clique em **Operações** ou **Rank**"
         ).replace(",", ".")
 
     def do_upgrade(self, user_id: str, estrutura: str) -> str:
+        who = self._who(user_id)
         if estrutura not in {"celeiros", "casernas", "forja"}:
-            return "❌ Upgrade indisponível\nΔ Estrutura inválida\nPróximo: escolha celeiros, casernas ou forja"
+            return f"{who} ❌ Upgrade indisponível\nΔ Estrutura inválida\nPróximo: escolha celeiros, casernas ou forja"
 
         d = self.get_or_create_domain(user_id)
         level_key = {"celeiros": "barn_level", "casernas": "barracks_level", "forja": "forge_level"}[estrutura]
         level = d[level_key]
         if level >= self.max_building_tier:
-            return f"❌ Upgrade indisponível\nΔ {estrutura.title()} já está no T{self.max_building_tier}\nPróximo: melhore outra construção"
+            return f"{who} ❌ Upgrade indisponível\nΔ {estrutura.title()} já está no T{self.max_building_tier}\nPróximo: melhore outra construção"
 
         cost = building_upgrade_cost(level, estrutura)
         if d["gold"] < cost:
             falta = cost - d["gold"]
-            return f"❌ Upgrade indisponível\nΔ Ouro insuficiente (falta {falta:,})\nPróximo: clique em **Resgatar**".replace(",", ".")
+            return f"{who} ❌ Upgrade indisponível\nΔ Ouro insuficiente (falta {falta:,})\nPróximo: clique em **Resgatar**".replace(",", ".")
 
         new_level = level + 1
         params = {"gold": d["gold"] - cost, level_key: new_level}
@@ -107,24 +114,26 @@ class GameplayService:
         self.update_player_state(user_id, **params)
         upgrade_secs = building_upgrade_time_seconds(new_level)
         return (
-            f"✅ Upgrade concluído ({estrutura.title()} T{new_level})\n"
+            f"{who} ✅ Upgrade concluído ({estrutura.title()} T{new_level})\n"
             f"Δ Ouro: -{cost:,} | Tempo ref: {upgrade_secs // 60} min\n"
             "Próximo: continue em Construções ou volte ao Domínio"
         ).replace(",", ".")
 
     def do_set_doctrine(self, user_id: str, doctrine: str) -> str:
+        who = self._who(user_id)
         doctrine = doctrine.strip().lower()
         if doctrine not in self.doctrines:
-            return "❌ Doutrina inválida. Escolha: cerco, choque, furtivo ou arcano."
+            return f"{who} ❌ Doutrina inválida. Escolha: cerco, choque, furtivo ou arcano."
 
         d = self.get_or_create_domain(user_id)
         with self.get_conn() as conn:
             g_bonus, s_bonus = self.get_slot_bonuses(conn, d["general_id"], d["strategist_id"])
         new_power = recalc_power(d["troops"], d["barracks_level"], d["forge_level"], doctrine, g_bonus, s_bonus)
         self.update_player_state(user_id, doctrine=doctrine, power=new_power)
-        return f"✅ Doutrina alterada para **{doctrine}**.\nΔ Poder: {new_power:,}\nPróximo: ajuste slots ou volte ao Domínio".replace(",", ".")
+        return f"{who} ✅ Doutrina alterada para **{doctrine}**.\nΔ Poder: {new_power:,}\nPróximo: ajuste slots ou volte ao Domínio".replace(",", ".")
 
     def do_recruit_general_auto(self, user_id: str) -> str:
+        who = self._who(user_id)
         with self.get_conn() as conn:
             count = conn.execute("SELECT COUNT(*) c FROM generals WHERE user_id = ?", (user_id,)).fetchone()["c"]
             name = f"General #{count + 1}"
@@ -134,28 +143,30 @@ class GameplayService:
             )
             gid = conn.execute("SELECT last_insert_rowid() id").fetchone()["id"]
             conn.commit()
-        return f"✅ General recrutado: **{name}** (id {gid}).\nΔ Slot disponível para equipar\nPróximo: selecione o general no painel".replace(",", ".")
+        return f"{who} ✅ General recrutado: **{name}** (id {gid}).\nΔ Slot disponível para equipar\nPróximo: selecione o general no painel".replace(",", ".")
 
     def do_equip_general(self, user_id: str, general_id: int) -> str:
+        who = self._who(user_id)
         d = self.get_or_create_domain(user_id)
         with self.get_conn() as conn:
             g = conn.execute("SELECT id FROM generals WHERE id = ? AND user_id = ?", (general_id, user_id)).fetchone()
             if not g:
-                return "❌ General não encontrado para este jogador."
+                return f"{who} ❌ General não encontrado para este jogador."
             conn.execute("UPDATE generals SET equipped = 0 WHERE user_id = ?", (user_id,))
             conn.execute("UPDATE generals SET equipped = 1 WHERE id = ?", (general_id,))
             conn.commit()
             g_bonus, s_bonus = self.get_slot_bonuses(conn, general_id, d["strategist_id"])
         new_power = recalc_power(d["troops"], d["barracks_level"], d["forge_level"], d["doctrine"], g_bonus, s_bonus)
         self.update_player_state(user_id, general_id=general_id, power=new_power)
-        return f"✅ General equipado (id {general_id}).\nΔ Poder: {new_power:,}\nPróximo: validar composição em Operações".replace(",", ".")
+        return f"{who} ✅ General equipado (id {general_id}).\nΔ Poder: {new_power:,}\nPróximo: validar composição em Operações".replace(",", ".")
 
     def do_recruit_strategist_auto(self, user_id: str) -> str:
+        who = self._who(user_id)
         d = self.get_or_create_domain(user_id)
         with self.get_conn() as conn:
             ok, msg = self.has_strategist_gate(d, conn)
             if not ok:
-                return f"❌ {msg}"
+                return f"{who} ❌ {msg}"
             count = conn.execute("SELECT COUNT(*) c FROM strategists WHERE user_id = ?", (user_id,)).fetchone()["c"]
             name = f"Estrategista #{count + 1}"
             conn.execute(
@@ -164,24 +175,25 @@ class GameplayService:
             )
             sid = conn.execute("SELECT last_insert_rowid() id").fetchone()["id"]
             conn.commit()
-        return f"✅ Estrategista recrutado: **{name}** (id {sid}).\nΔ Slot de especialista disponível\nPróximo: selecione o estrategista no painel".replace(",", ".")
+        return f"{who} ✅ Estrategista recrutado: **{name}** (id {sid}).\nΔ Slot de especialista disponível\nPróximo: selecione o estrategista no painel".replace(",", ".")
 
     def do_equip_strategist(self, user_id: str, strategist_id: int) -> str:
+        who = self._who(user_id)
         d = self.get_or_create_domain(user_id)
         with self.get_conn() as conn:
             ok, msg = self.has_strategist_gate(d, conn)
             if not ok:
-                return f"❌ {msg}"
+                return f"{who} ❌ {msg}"
             srow = conn.execute("SELECT id FROM strategists WHERE id = ? AND user_id = ?", (strategist_id, user_id)).fetchone()
             if not srow:
-                return "❌ Estrategista não encontrado para este jogador."
+                return f"{who} ❌ Estrategista não encontrado para este jogador."
             conn.execute("UPDATE strategists SET equipped = 0 WHERE user_id = ?", (user_id,))
             conn.execute("UPDATE strategists SET equipped = 1 WHERE id = ?", (strategist_id,))
             conn.commit()
             g_bonus, s_bonus = self.get_slot_bonuses(conn, d["general_id"], strategist_id)
         new_power = recalc_power(d["troops"], d["barracks_level"], d["forge_level"], d["doctrine"], g_bonus, s_bonus)
         self.update_player_state(user_id, strategist_id=strategist_id, power=new_power)
-        return f"✅ Estrategista equipado (id {strategist_id}).\nΔ Poder: {new_power:,}\nPróximo: iniciar simulação de operação".replace(",", ".")
+        return f"{who} ✅ Estrategista equipado (id {strategist_id}).\nΔ Poder: {new_power:,}\nPróximo: iniciar simulação de operação".replace(",", ".")
 
     def _normalize_operation_key(self, raw_key: str) -> str:
         key = raw_key.strip().lower()
@@ -285,17 +297,18 @@ class GameplayService:
         return "✅ disponível"
 
     def do_simular_operacao(self, user_id: str, key: str) -> str:
+        who = self._who(user_id)
         d = self.get_or_create_domain(user_id)
         with self.get_conn() as conn:
             op_key = self._normalize_operation_key(key)
             op = conn.execute("SELECT * FROM operations WHERE key = ?", (op_key,)).fetchone()
             if not op:
-                return "❌ Operação inválida. Use: tumba_sultao, ruinas_muralha, poco_nomes, estrada_cinzas, fortim_sol_negro."
+                return f"{who} ❌ Operação inválida. Use: tumba_sultao, ruinas_muralha, poco_nomes, estrada_cinzas, fortim_sol_negro."
 
             opf = self._operation_fields(op)
             blocker, partial_route = self._operation_gate(d, opf, conn)
             if blocker:
-                return f"❌ {blocker}"
+                return f"{who} ❌ {blocker}"
 
             chance = simulate_operation_success_chance(d["power"], opf["difficulty_power"], d["doctrine"], opf["preferred_doctrine"])
             if partial_route:
@@ -341,7 +354,7 @@ class GameplayService:
         relic_line = self.resolve_discovery(user_id, f"operacao:{op['key']}", d["forge_level"])
 
         return (
-            f"🧪 Simulação `{op['title']}`\n"
+            f"{who} 🧪 Simulação `{op['title']}`\n"
             f"{route_line}\n"
             f"Poder atual: {d['power']:,} | Dificuldade: {opf['difficulty_power']:,}\n"
             f"Chance estimada: {chance*100:.1f}%\n"

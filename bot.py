@@ -257,6 +257,26 @@ def init_db() -> None:
             """
         )
 
+        # Compatibilidade incremental base (fundação do domínio)
+        ensure_column(conn, "domains", "created_at_ts", "INTEGER NOT NULL DEFAULT 0")
+
+        ensure_column(conn, "domain_buildings", "barn_level", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "domain_buildings", "barracks_level", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "domain_buildings", "forge_level", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "domain_buildings", "building_upgrade_ends_at_ts", "INTEGER")
+        ensure_column(conn, "domain_buildings", "updated_at_ts", "INTEGER NOT NULL DEFAULT 0")
+
+        ensure_column(conn, "resources", "gold", "INTEGER NOT NULL DEFAULT 100000")
+        ensure_column(conn, "resources", "accumulated_maintenance", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "resources", "last_collect_ts", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "resources", "updated_at_ts", "INTEGER NOT NULL DEFAULT 0")
+
+        ensure_column(conn, "army", "troops", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "army", "doctrine", "TEXT NOT NULL DEFAULT 'choque'")
+        ensure_column(conn, "army", "power", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "army", "last_train_ts", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "army", "updated_at_ts", "INTEGER NOT NULL DEFAULT 0")
+
         # Compatibilidade incremental de colunas da Fase 3
         ensure_column(conn, "army", "general_id", "INTEGER")
         ensure_column(conn, "army", "strategist_id", "INTEGER")
@@ -1211,7 +1231,7 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
     if isinstance(error, commands.CommandNotFound):
         return
     logger.exception("Erro de comando", exc_info=error)
-    await ctx.send("Erro interno ao executar comando.")
+    await ctx.send(f"<@{ctx.author.id}> Erro interno ao executar comando.")
 
 
 @bot.event
