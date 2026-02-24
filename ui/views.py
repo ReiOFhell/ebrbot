@@ -266,26 +266,47 @@ class DominioView(discord.ui.View):
             return False
         return True
 
+    def _log_action_result(self, *, user_id: str, guild_id: str | None, action: str, message: str) -> None:
+        self.deps.log_panel_event(
+            user_id=user_id,
+            guild_id=guild_id,
+            event_name="panel_action",
+            event_action=action,
+        )
+        if message.startswith("❌"):
+            error_code = "action_error"
+            if "Requisito ausente" in message:
+                error_code = "requirement_missing"
+            elif "Cooldown" in message:
+                error_code = "cooldown"
+            self.deps.log_panel_event(
+                user_id=user_id,
+                guild_id=guild_id,
+                event_name="panel_error",
+                event_action=action,
+                error_code=error_code,
+            )
+
     @discord.ui.button(label="Resgatar", style=discord.ButtonStyle.success)
     async def btn_resgatar(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        self.deps.log_panel_event(
+        msg = self.deps.service.do_collect(str(interaction.user.id))
+        self._log_action_result(
             user_id=str(interaction.user.id),
             guild_id=str(interaction.guild_id) if interaction.guild_id else None,
-            event_name="panel_action",
-            event_action="resgatar",
+            action="resgatar",
+            message=msg,
         )
-        msg = self.deps.service.do_collect(str(interaction.user.id))
         await interaction.response.send_message(msg, ephemeral=True)
 
     @discord.ui.button(label="Treinar", style=discord.ButtonStyle.primary)
     async def btn_treinar(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        self.deps.log_panel_event(
+        msg = self.deps.service.do_train(str(interaction.user.id))
+        self._log_action_result(
             user_id=str(interaction.user.id),
             guild_id=str(interaction.guild_id) if interaction.guild_id else None,
-            event_name="panel_action",
-            event_action="treinar",
+            action="treinar",
+            message=msg,
         )
-        msg = self.deps.service.do_train(str(interaction.user.id))
         await interaction.response.send_message(msg, ephemeral=True)
 
     @discord.ui.button(label="Construções", style=discord.ButtonStyle.secondary)

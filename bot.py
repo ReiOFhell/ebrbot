@@ -819,6 +819,7 @@ async def diagnostico(ctx: commands.Context) -> None:
 @commands.has_permissions(administrator=True)
 async def painel_kpis(ctx: commands.Context) -> None:
     week_ago = now_ts() - (7 * 24 * 3600)
+    day_seconds = 24 * 3600
     with get_conn() as conn:
         opens = conn.execute(
             "SELECT COUNT(*) c FROM panel_events WHERE event_name = 'panel_open' AND created_at_ts >= ?",
@@ -850,17 +851,114 @@ async def painel_kpis(ctx: commands.Context) -> None:
             """,
             (week_ago,),
         ).fetchall()
+        requirement_errors = conn.execute(
+            """
+            SELECT COUNT(*) c
+            FROM panel_events
+            WHERE event_name = 'panel_error'
+              AND error_code = 'requirement_missing'
+              AND created_at_ts >= ?
+            """,
+            (week_ago,),
+        ).fetchone()["c"]
+
+        users_3x_day = conn.execute(
+            """
+            SELECT COUNT(*) c FROM (
+                SELECT user_id
+                FROM panel_events
+                WHERE event_name = 'panel_open' AND created_at_ts >= ?
+                GROUP BY user_id, (created_at_ts / ?)
+                HAVING COUNT(*) >= 3
+            )
+            """,
+            (week_ago, day_seconds),
+        ).fetchone()["c"]
+
+        avg_time_first_action = conn.execute(
+            """
+            WITH first_open AS (
+                SELECT user_id, MIN(created_at_ts) AS open_ts
+                FROM panel_events
+                WHERE event_name = 'panel_open' AND created_at_ts >= ?
+                GROUP BY user_id
+            ), first_action AS (
+                SELECT p.user_id, MIN(p.created_at_ts) AS action_ts
+                FROM panel_events p
+                JOIN first_open o ON o.user_id = p.user_id
+                WHERE p.event_name = 'panel_action' AND p.created_at_ts >= o.open_ts
+                GROUP BY p.user_id
+            )
+            SELECT AVG(action_ts - open_ts) AS avg_delta
+            FROM first_open o
+            JOIN first_action a ON a.user_id = o.user_id
+            """,
+            (week_ago,),
+        ).fetchone()["avg_delta"]
+
+        d1 = conn.execute(
+            """
+            WITH first_open AS (
+                SELECT user_id, MIN(created_at_ts) AS first_ts
+                FROM panel_events
+                WHERE event_name = 'panel_open'
+                GROUP BY user_id
+            ), returned AS (
+                SELECT DISTINCT f.user_id
+                FROM first_open f
+                JOIN panel_events p ON p.user_id = f.user_id
+                WHERE p.event_name = 'panel_open'
+                  AND p.created_at_ts >= f.first_ts + ?
+                  AND p.created_at_ts <  f.first_ts + ?
+            )
+            SELECT
+                (SELECT COUNT(*) FROM returned) AS returned_users,
+                (SELECT COUNT(*) FROM first_open) AS total_users
+            """,
+            (day_seconds, 2 * day_seconds),
+        ).fetchone()
+
+        d7 = conn.execute(
+            """
+            WITH first_open AS (
+                SELECT user_id, MIN(created_at_ts) AS first_ts
+                FROM panel_events
+                WHERE event_name = 'panel_open'
+                GROUP BY user_id
+            ), returned AS (
+                SELECT DISTINCT f.user_id
+                FROM first_open f
+                JOIN panel_events p ON p.user_id = f.user_id
+                WHERE p.event_name = 'panel_open'
+                  AND p.created_at_ts >= f.first_ts + ?
+                  AND p.created_at_ts <  f.first_ts + ?
+            )
+            SELECT
+                (SELECT COUNT(*) FROM returned) AS returned_users,
+                (SELECT COUNT(*) FROM first_open) AS total_users
+            """,
+            (7 * day_seconds, 8 * day_seconds),
+        ).fetchone()
 
     adoption = (unique_open_users / active_users * 100.0) if active_users else 0.0
     error_rate = (errors / (actions + errors) * 100.0) if (actions + errors) else 0.0
     action_per_open = (actions / opens) if opens else 0.0
+    requirement_error_rate = (requirement_errors / (actions + requirement_errors) * 100.0) if (actions + requirement_errors) else 0.0
+    usage_3x_day_pct = (users_3x_day / unique_open_users * 100.0) if unique_open_users else 0.0
+    avg_time_first_action_s = float(avg_time_first_action or 0.0)
+    d1_rate = (d1["returned_users"] / d1["total_users"] * 100.0) if d1["total_users"] else 0.0
+    d7_rate = (d7["returned_users"] / d7["total_users"] * 100.0) if d7["total_users"] else 0.0
 
     lines = [f"• {r['event_action']}: {r['c']}" for r in by_button] if by_button else ["• sem dados"]
     await ctx.send(
         "📊 KPIs do Painel (7 dias)\n"
+        f"Uso `!dominio` 3x/dia: {usage_3x_day_pct:.1f}% ({users_3x_day}/{unique_open_users})\n"
         f"Adoção painel: {adoption:.1f}% (meta ≥ 70%)\n"
         f"Erro de uso: {error_rate:.1f}% (meta ≤ 15%)\n"
+        f"Erro por requisito ausente: {requirement_error_rate:.1f}%\n"
         f"Ações por sessão: {action_per_open:.2f} (meta ≥ 2.5)\n"
+        f"Tempo médio open→1ª ação: {avg_time_first_action_s:.1f}s\n"
+        f"Retenção D1/D7: {d1_rate:.1f}% / {d7_rate:.1f}%\n"
         f"Usuários com panel_open: {unique_open_users} | Usuários ativos: {active_users}\n"
         "Ações por botão:\n" + "\n".join(lines)
     )
