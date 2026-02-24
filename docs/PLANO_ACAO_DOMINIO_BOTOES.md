@@ -121,7 +121,7 @@ Isso evita meta única e aumenta disputa saudável.
 
 ---
 
-## Etapa B — Subviews de Construções e Militar (3–4 dias)
+## Etapa B — Subviews de Construções e Militar (3–4 dias) ✅ Concluída
 
 ### Entregas
 - **ConstruçõesView** (Celeiros/Casernas/Forja + Melhorar);
@@ -132,9 +132,14 @@ Isso evita meta única e aumenta disputa saudável.
 ### Critério de pronto
 - upgrades e composição militar funcionam integralmente via botões.
 
+### Evidência de implementação
+- **ConstruçõesView** com `🛠️ Melhorar` via seletor (`celeiros`, `casernas`, `forja`) e `⬅️ Voltar` para o painel raiz;
+- **MilitarView** com seletor de doutrina, seletores de equipar slots e botões de recrutamento;
+- feedback de ação no próprio embed (`Ação` + `Fluxo`) sem exigir sintaxe textual.
+
 ---
 
-## Etapa C — Operações por painel (3–4 dias)
+## Etapa C — Operações por painel (3–4 dias) ✅ Concluída
 
 ### Entregas
 - **OperaçõesView** listando operações por desbloqueio;
@@ -145,9 +150,14 @@ Isso evita meta única e aumenta disputa saudável.
 ### Critério de pronto
 - jogador consegue descobrir operações disponíveis e simular sem sair do painel.
 
+### Evidência de implementação
+- **OperacoesView** com seletor de operações e status de desbloqueio por requisito;
+- simulação disparada por clique com bloqueios claros e resposta no padrão resultado/variação/próximo passo;
+- persistência de execução confirmada em `operation_runs` via fluxo de painel.
+
 ---
 
-## Etapa D — Redução real de comandos públicos (1–2 dias)
+## Etapa D — Redução real de comandos públicos (1–2 dias) ✅ Concluída
 
 ### Entregas
 - manter públicos: `!dominio`, `!rank`, `!guia`;
@@ -156,6 +166,11 @@ Isso evita meta única e aumenta disputa saudável.
 
 ### Critério de pronto
 - onboarding completo com 1 comando principal.
+
+### Evidência de implementação
+- `!guia` orienta fluxo clique-first com foco em `!dominio`;
+- comandos legados operacionais foram mantidos como suporte interno (`hidden=True`), saindo da superfície pública;
+- superfície pública recomendada: `!dominio`, `!rank`, `!guia`.
 
 ---
 

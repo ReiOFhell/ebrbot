@@ -515,6 +515,127 @@ def do_upgrade(user_id: str, estrutura: str) -> str:
     ).replace(",", ".")
 
 
+def do_set_doctrine(user_id: str, doctrine: str) -> str:
+    doctrine = doctrine.strip().lower()
+    if doctrine not in DOCTRINES:
+        return "❌ Doutrina inválida. Escolha: cerco, choque, furtivo ou arcano."
+
+    d = get_or_create_domain(user_id)
+    with get_conn() as conn:
+        g_bonus, s_bonus = get_slot_bonuses(conn, d["general_id"], d["strategist_id"])
+    new_power = recalc_power(d["troops"], d["barracks_level"], d["forge_level"], doctrine, g_bonus, s_bonus)
+    update_player_state(user_id, doctrine=doctrine, power=new_power)
+    return f"✅ Doutrina alterada para **{doctrine}**.\nΔ Poder: {new_power:,}\nPróximo: ajuste slots ou volte ao Domínio".replace(",", ".")
+
+
+def do_recruit_general_auto(user_id: str) -> str:
+    with get_conn() as conn:
+        count = conn.execute("SELECT COUNT(*) c FROM generals WHERE user_id = ?", (user_id,)).fetchone()["c"]
+        name = f"General #{count + 1}"
+        conn.execute(
+            "INSERT INTO generals (user_id, name, rank, equipped, created_at_ts) VALUES (?, ?, 'C', 0, ?)",
+            (user_id, name, now_ts()),
+        )
+        gid = conn.execute("SELECT last_insert_rowid() id").fetchone()["id"]
+        conn.commit()
+    return f"✅ General recrutado: **{name}** (id {gid}).\nΔ Slot disponível para equipar\nPróximo: selecione o general no painel".replace(",", ".")
+
+
+def do_equip_general(user_id: str, general_id: int) -> str:
+    d = get_or_create_domain(user_id)
+    with get_conn() as conn:
+        g = conn.execute("SELECT id FROM generals WHERE id = ? AND user_id = ?", (general_id, user_id)).fetchone()
+        if not g:
+            return "❌ General não encontrado para este jogador."
+        conn.execute("UPDATE generals SET equipped = 0 WHERE user_id = ?", (user_id,))
+        conn.execute("UPDATE generals SET equipped = 1 WHERE id = ?", (general_id,))
+        conn.commit()
+        g_bonus, s_bonus = get_slot_bonuses(conn, general_id, d["strategist_id"])
+    new_power = recalc_power(d["troops"], d["barracks_level"], d["forge_level"], d["doctrine"], g_bonus, s_bonus)
+    update_player_state(user_id, general_id=general_id, power=new_power)
+    return f"✅ General equipado (id {general_id}).\nΔ Poder: {new_power:,}\nPróximo: validar composição em Operações".replace(",", ".")
+
+
+def do_recruit_strategist_auto(user_id: str) -> str:
+    d = get_or_create_domain(user_id)
+    with get_conn() as conn:
+        ok, msg = has_strategist_gate(d, conn)
+        if not ok:
+            return f"❌ {msg}"
+        count = conn.execute("SELECT COUNT(*) c FROM strategists WHERE user_id = ?", (user_id,)).fetchone()["c"]
+        name = f"Estrategista #{count + 1}"
+        conn.execute(
+            "INSERT INTO strategists (user_id, name, rank, equipped, created_at_ts) VALUES (?, ?, 'C', 0, ?)",
+            (user_id, name, now_ts()),
+        )
+        sid = conn.execute("SELECT last_insert_rowid() id").fetchone()["id"]
+        conn.commit()
+    return f"✅ Estrategista recrutado: **{name}** (id {sid}).\nΔ Slot de especialista disponível\nPróximo: selecione o estrategista no painel".replace(",", ".")
+
+
+def do_equip_strategist(user_id: str, strategist_id: int) -> str:
+    d = get_or_create_domain(user_id)
+    with get_conn() as conn:
+        ok, msg = has_strategist_gate(d, conn)
+        if not ok:
+            return f"❌ {msg}"
+        srow = conn.execute("SELECT id FROM strategists WHERE id = ? AND user_id = ?", (strategist_id, user_id)).fetchone()
+        if not srow:
+            return "❌ Estrategista não encontrado para este jogador."
+        conn.execute("UPDATE strategists SET equipped = 0 WHERE user_id = ?", (user_id,))
+        conn.execute("UPDATE strategists SET equipped = 1 WHERE id = ?", (strategist_id,))
+        conn.commit()
+        g_bonus, s_bonus = get_slot_bonuses(conn, d["general_id"], strategist_id)
+    new_power = recalc_power(d["troops"], d["barracks_level"], d["forge_level"], d["doctrine"], g_bonus, s_bonus)
+    update_player_state(user_id, strategist_id=strategist_id, power=new_power)
+    return f"✅ Estrategista equipado (id {strategist_id}).\nΔ Poder: {new_power:,}\nPróximo: iniciar simulação de operação".replace(",", ".")
+
+
+def do_simular_operacao(user_id: str, key: str) -> str:
+    d = get_or_create_domain(user_id)
+    with get_conn() as conn:
+        op = conn.execute("SELECT * FROM operations WHERE key = ?", (key.strip().lower(),)).fetchone()
+        if not op:
+            return "❌ Operação inválida."
+        if d["barracks_level"] < op["min_barracks_level"]:
+            return f"❌ Requisito ausente: Casernas T{op['min_barracks_level']}+."
+        if op["requires_strategist"] and not d["strategist_id"]:
+            return "❌ Requisito ausente: Estrategista equipado para esta operação."
+        if d["troops"] <= 0:
+            return "❌ Requisito ausente: sem tropas não há incursão."
+        chance = simulate_operation_success_chance(d["power"], op["difficulty_power"], d["doctrine"], op["preferred_doctrine"])
+
+    outcome = "vitória tática" if random.random() <= chance else "falha tática"
+    troops_lost = int(max(1, d["troops"] * op["base_risk_percent"] * (0.4 if outcome == "vitória tática" else 0.8)))
+    base_gold_delta = int(op["base_gold_reward"] * (1.0 if outcome == "vitória tática" else 0.2))
+    forge_mult = 1.0 + (d["forge_level"] - 1) * 0.03
+    gold_delta = int(base_gold_delta * forge_mult)
+
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO operation_runs (user_id, operation_id, outcome, troops_lost, gold_delta, created_at_ts)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, op["id"], outcome, troops_lost, gold_delta, now_ts()),
+        )
+        conn.commit()
+
+    relic_line = "Nenhum achado relevante."
+    if d["forge_level"] >= 4 and random.random() <= min(0.20, 0.04 + d["forge_level"] * 0.01):
+        relic_line = "Achado: fragmento relicário encontrado na incursão."
+
+    return (
+        f"🧪 Simulação `{op['title']}`\n"
+        f"Poder atual: {d['power']:,} | Dificuldade: {op['difficulty_power']:,}\n"
+        f"Chance estimada: {chance*100:.1f}%\n"
+        f"Resultado simulado: **{outcome}**\n"
+        f"Registro: perdas estimadas {troops_lost:,} tropas | recompensa base {gold_delta:,} ouro\n"
+        f"{relic_line}\n"
+        "Próximo: tente outra operação ou ajuste composição militar"
+    ).replace(",", ".")
+
+
 def build_rank_embed() -> discord.Embed:
     with get_conn() as conn:
         rich = conn.execute(
@@ -615,6 +736,60 @@ def build_construcoes_embed(user_id: str, notice: str | None = None) -> discord.
     return embed
 
 
+def build_militar_embed(user_id: str, notice: str | None = None) -> discord.Embed:
+    d = get_or_create_domain(user_id)
+    embed = discord.Embed(title="🛡️ Painel Militar", color=discord.Color.dark_teal())
+    embed.description = (
+        f"Doutrina: **{d['doctrine']}**\n"
+        f"General slot: **{d['general_id'] or 'vazio'}**\n"
+        f"Estrategista slot: **{d['strategist_id'] or 'vazio'}**\n"
+        f"Poder atual: **{d['power']:,}**"
+    ).replace(",", ".")
+    if notice:
+        embed.add_field(name="Ação", value=notice, inline=False)
+    embed.add_field(
+        name="Fluxo",
+        value=(
+            "✅ Composição militar pronta\n"
+            "Δ Doutrina e slots alteram o poder\n"
+            "Próximo: ajuste doutrina/slots e volte ao Domínio"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Use os botões para gerir doutrina e slots")
+    return embed
+
+
+def build_operacoes_embed(user_id: str, notice: str | None = None) -> discord.Embed:
+    d = get_or_create_domain(user_id)
+    with get_conn() as conn:
+        ops = conn.execute("SELECT * FROM operations ORDER BY id").fetchall()
+    lines: list[str] = []
+    for op in ops:
+        status = "✅ disponível"
+        if d["barracks_level"] < op["min_barracks_level"]:
+            status = f"🔒 Casernas T{op['min_barracks_level']}+"
+        elif op["requires_strategist"] and not d["strategist_id"]:
+            status = "🔒 requer estrategista equipado"
+        lines.append(f"• `{op['key']}` — {status}")
+
+    embed = discord.Embed(title="⚔️ Painel de Operações", color=discord.Color.dark_red())
+    embed.description = "\n".join(lines) if lines else "Nenhuma operação cadastrada."
+    if notice:
+        embed.add_field(name="Ação", value=notice, inline=False)
+    embed.add_field(
+        name="Fluxo",
+        value=(
+            "✅ Operações verificadas por requisito\n"
+            "Δ Simulação grava histórico em operation_runs\n"
+            "Próximo: escolha uma operação no seletor"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Operações usam barracks tier, tropas e slot de estrategista")
+    return embed
+
+
 class ConstrucoesView(discord.ui.View):
     def __init__(self, author_id: int):
         super().__init__(timeout=180)
@@ -672,6 +847,162 @@ class ConstrucoesUpgradeView(discord.ui.View):
         await interaction.response.edit_message(
             embed=build_construcoes_embed(str(interaction.user.id)),
             view=ConstrucoesView(author_id=interaction.user.id),
+        )
+
+
+class DoctrineSelect(discord.ui.Select):
+    def __init__(self) -> None:
+        options = [
+            discord.SelectOption(label="Cerco", value="cerco"),
+            discord.SelectOption(label="Choque", value="choque"),
+            discord.SelectOption(label="Furtivo", value="furtivo"),
+            discord.SelectOption(label="Arcano", value="arcano"),
+        ]
+        super().__init__(placeholder="Selecione a doutrina", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        msg = do_set_doctrine(str(interaction.user.id), self.values[0])
+        await interaction.response.edit_message(
+            embed=build_militar_embed(str(interaction.user.id), notice=msg),
+            view=MilitarView(author_id=interaction.user.id),
+        )
+
+
+class GeneralEquipSelect(discord.ui.Select):
+    def __init__(self, user_id: str) -> None:
+        with get_conn() as conn:
+            generals = conn.execute("SELECT id, name FROM generals WHERE user_id = ? ORDER BY id DESC LIMIT 25", (user_id,)).fetchall()
+        options = [discord.SelectOption(label=f"{g['name']} (id {g['id']})", value=str(g["id"])) for g in generals]
+        if not options:
+            options = [discord.SelectOption(label="Sem generais recrutados", value="none", default=True)]
+        super().__init__(placeholder="Equipar general", min_values=1, max_values=1, options=options, disabled=(options[0].value == "none"))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        value = self.values[0]
+        if value == "none":
+            await interaction.response.send_message("❌ Nenhum general disponível.", ephemeral=True)
+            return
+        msg = do_equip_general(str(interaction.user.id), int(value))
+        await interaction.response.edit_message(
+            embed=build_militar_embed(str(interaction.user.id), notice=msg),
+            view=MilitarView(author_id=interaction.user.id),
+        )
+
+
+class StrategistEquipSelect(discord.ui.Select):
+    def __init__(self, user_id: str) -> None:
+        with get_conn() as conn:
+            strategists = conn.execute(
+                "SELECT id, name FROM strategists WHERE user_id = ? ORDER BY id DESC LIMIT 25", (user_id,)
+            ).fetchall()
+        options = [discord.SelectOption(label=f"{s['name']} (id {s['id']})", value=str(s["id"])) for s in strategists]
+        if not options:
+            options = [discord.SelectOption(label="Sem estrategistas recrutados", value="none", default=True)]
+        super().__init__(
+            placeholder="Equipar estrategista",
+            min_values=1,
+            max_values=1,
+            options=options,
+            disabled=(options[0].value == "none"),
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        value = self.values[0]
+        if value == "none":
+            await interaction.response.send_message("❌ Nenhum estrategista disponível.", ephemeral=True)
+            return
+        msg = do_equip_strategist(str(interaction.user.id), int(value))
+        await interaction.response.edit_message(
+            embed=build_militar_embed(str(interaction.user.id), notice=msg),
+            view=MilitarView(author_id=interaction.user.id),
+        )
+
+
+class MilitarView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=180)
+        self.author_id = author_id
+        user_id = str(author_id)
+        self.add_item(DoctrineSelect())
+        self.add_item(GeneralEquipSelect(user_id))
+        self.add_item(StrategistEquipSelect(user_id))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Apenas o dono do painel pode usar estes botões.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="🎖️ Recrutar General", style=discord.ButtonStyle.success)
+    async def btn_recrutar_general(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        msg = do_recruit_general_auto(str(interaction.user.id))
+        await interaction.response.edit_message(
+            embed=build_militar_embed(str(interaction.user.id), notice=msg),
+            view=MilitarView(author_id=interaction.user.id),
+        )
+
+    @discord.ui.button(label="📐 Recrutar Estrategista", style=discord.ButtonStyle.secondary)
+    async def btn_recrutar_strategista(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        msg = do_recruit_strategist_auto(str(interaction.user.id))
+        await interaction.response.edit_message(
+            embed=build_militar_embed(str(interaction.user.id), notice=msg),
+            view=MilitarView(author_id=interaction.user.id),
+        )
+
+    @discord.ui.button(label="⬅️ Voltar", style=discord.ButtonStyle.primary)
+    async def btn_back(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=build_dominio_embed(str(interaction.user.id)),
+            view=DominioView(author_id=interaction.user.id),
+        )
+
+
+class OperationSelect(discord.ui.Select):
+    def __init__(self, user_id: str) -> None:
+        d = get_or_create_domain(user_id)
+        with get_conn() as conn:
+            ops = conn.execute("SELECT key, title, min_barracks_level, requires_strategist FROM operations ORDER BY id").fetchall()
+        options: list[discord.SelectOption] = []
+        for op in ops:
+            desc = "Disponível"
+            if d["barracks_level"] < op["min_barracks_level"]:
+                desc = f"Requer Casernas T{op['min_barracks_level']}+"
+            elif op["requires_strategist"] and not d["strategist_id"]:
+                desc = "Requer estrategista equipado"
+            options.append(discord.SelectOption(label=op["title"], value=op["key"], description=desc[:100]))
+        if not options:
+            options = [discord.SelectOption(label="Sem operações", value="none")]
+        super().__init__(placeholder="Selecionar operação para simular", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        value = self.values[0]
+        if value == "none":
+            await interaction.response.send_message("❌ Nenhuma operação cadastrada.", ephemeral=True)
+            return
+        msg = do_simular_operacao(str(interaction.user.id), value)
+        await interaction.response.edit_message(
+            embed=build_operacoes_embed(str(interaction.user.id), notice=msg),
+            view=OperacoesView(author_id=interaction.user.id),
+        )
+
+
+class OperacoesView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=180)
+        self.author_id = author_id
+        self.add_item(OperationSelect(str(author_id)))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Apenas o dono do painel pode usar estes botões.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="⬅️ Voltar", style=discord.ButtonStyle.primary)
+    async def btn_back(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            embed=build_dominio_embed(str(interaction.user.id)),
+            view=DominioView(author_id=interaction.user.id),
         )
 
 
@@ -734,14 +1065,9 @@ class DominioView(discord.ui.View):
             event_name="panel_action",
             event_action="militar",
         )
-        d = get_or_create_domain(str(interaction.user.id))
-        await interaction.response.send_message(
-            (
-                "✅ Painel militar aberto.\n"
-                f"Δ Doutrina: {d['doctrine']} | General: {d['general_id'] or 'vazio'} | Estrategista: {d['strategist_id'] or 'vazio'}\n"
-                "Próximo: use `!doutrina` / `!equipar_general` / `!equipar_estrategista`"
-            ),
-            ephemeral=True,
+        await interaction.response.edit_message(
+            embed=build_militar_embed(str(interaction.user.id)),
+            view=MilitarView(author_id=interaction.user.id),
         )
 
     @discord.ui.button(label="Operações", style=discord.ButtonStyle.secondary)
@@ -752,23 +1078,9 @@ class DominioView(discord.ui.View):
             event_name="panel_action",
             event_action="operacoes",
         )
-        with get_conn() as conn:
-            ops = conn.execute("SELECT key, title, min_barracks_level, requires_strategist FROM operations ORDER BY id").fetchall()
-        d = get_or_create_domain(str(interaction.user.id))
-        lines = []
-        for op in ops:
-            reason = "OK"
-            if d["barracks_level"] < op["min_barracks_level"]:
-                reason = f"Requer Casernas T{op['min_barracks_level']}+"
-            elif op["requires_strategist"] and not d["strategist_id"]:
-                reason = "Requer estrategista equipado"
-            lines.append(f"• `{op['key']}` — {reason}")
-        await interaction.response.send_message(
-            "✅ Painel de operações aberto.\n"
-            f"Δ Operações mapeadas: {len(lines)}\n"
-            "\n".join(lines)
-            + "\nPróximo: use `!simular_operacao <key>`",
-            ephemeral=True,
+        await interaction.response.edit_message(
+            embed=build_operacoes_embed(str(interaction.user.id)),
+            view=OperacoesView(author_id=interaction.user.id),
         )
 
     @discord.ui.button(label="Rank", style=discord.ButtonStyle.secondary)
@@ -798,17 +1110,17 @@ async def dominio(ctx: commands.Context) -> None:
     await ctx.send(embed=embed, view=DominioView(author_id=ctx.author.id))
 
 
-@bot.command(name="coletar")
+@bot.command(name="coletar", hidden=True)
 async def coletar(ctx: commands.Context) -> None:
     await ctx.send(do_collect(str(ctx.author.id)))
 
 
-@bot.command(name="treinar")
+@bot.command(name="treinar", hidden=True)
 async def treinar(ctx: commands.Context) -> None:
     await ctx.send(do_train(str(ctx.author.id)))
 
 
-@bot.command(name="melhorar")
+@bot.command(name="melhorar", hidden=True)
 async def melhorar(ctx: commands.Context, estrutura: str | None = None) -> None:
     if not estrutura:
         await ctx.send("Uso: `!melhorar <celeiros|casernas|forja>`")
@@ -816,7 +1128,7 @@ async def melhorar(ctx: commands.Context, estrutura: str | None = None) -> None:
     await ctx.send(do_upgrade(str(ctx.author.id), estrutura.strip().lower()))
 
 
-@bot.command(name="doutrina")
+@bot.command(name="doutrina", hidden=True)
 async def doutrina(ctx: commands.Context, estilo: str | None = None) -> None:
     if not estilo:
         await ctx.send("Uso: `!doutrina <cerco|choque|furtivo|arcano>`")
@@ -835,7 +1147,7 @@ async def doutrina(ctx: commands.Context, estilo: str | None = None) -> None:
     await ctx.send(f"✅ Doutrina alterada para **{estilo}**. Novo poder: **{new_power:,}**".replace(",", "."))
 
 
-@bot.command(name="recrutar_general")
+@bot.command(name="recrutar_general", hidden=True)
 async def recrutar_general(ctx: commands.Context, *, nome: str | None = None) -> None:
     if not nome:
         await ctx.send("Uso: `!recrutar_general <nome>`")
@@ -851,7 +1163,7 @@ async def recrutar_general(ctx: commands.Context, *, nome: str | None = None) ->
     await ctx.send("✅ General recrutado. Use `!equipar_general <id>` para equipar.")
 
 
-@bot.command(name="equipar_general")
+@bot.command(name="equipar_general", hidden=True)
 async def equipar_general(ctx: commands.Context, general_id: int | None = None) -> None:
     if not general_id:
         await ctx.send("Uso: `!equipar_general <id>`")
@@ -872,7 +1184,7 @@ async def equipar_general(ctx: commands.Context, general_id: int | None = None) 
     await ctx.send(f"✅ General equipado (id {general_id}). Poder atualizado: {new_power:,}".replace(",", "."))
 
 
-@bot.command(name="recrutar_estrategista")
+@bot.command(name="recrutar_estrategista", hidden=True)
 async def recrutar_estrategista(ctx: commands.Context, *, nome: str | None = None) -> None:
     if not nome:
         await ctx.send("Uso: `!recrutar_estrategista <nome>`")
@@ -892,7 +1204,7 @@ async def recrutar_estrategista(ctx: commands.Context, *, nome: str | None = Non
     await ctx.send("✅ Estrategista recrutado. Use `!equipar_estrategista <id>` para equipar.")
 
 
-@bot.command(name="equipar_estrategista")
+@bot.command(name="equipar_estrategista", hidden=True)
 async def equipar_estrategista(ctx: commands.Context, strategist_id: int | None = None) -> None:
     if not strategist_id:
         await ctx.send("Uso: `!equipar_estrategista <id>`")
@@ -917,7 +1229,7 @@ async def equipar_estrategista(ctx: commands.Context, strategist_id: int | None 
     await ctx.send(f"✅ Estrategista equipado (id {strategist_id}). Poder atualizado: {new_power:,}".replace(",", "."))
 
 
-@bot.command(name="simular_operacao")
+@bot.command(name="simular_operacao", hidden=True)
 async def simular_operacao(ctx: commands.Context, key: str | None = None) -> None:
     if not key:
         await ctx.send("Uso: `!simular_operacao <tumba_sultao|ruinas_muralha|estrada_cinzas>`")
@@ -973,7 +1285,7 @@ async def simular_operacao(ctx: commands.Context, key: str | None = None) -> Non
 
 
 
-@bot.command(name="forjar")
+@bot.command(name="forjar", hidden=True)
 async def forjar(ctx: commands.Context) -> None:
     user_id = str(ctx.author.id)
     d = get_or_create_domain(user_id)
@@ -1011,7 +1323,7 @@ async def rank(ctx: commands.Context) -> None:
     await ctx.send(embed=build_rank_embed())
 
 
-@bot.command(name="economia_teste")
+@bot.command(name="economia_teste", hidden=True)
 @commands.has_permissions(administrator=True)
 async def economia_teste(ctx: commands.Context) -> None:
     fake = economy_snapshot(barn_level=4, barracks_level=3, forge_level=2, troops=1750)
@@ -1045,13 +1357,14 @@ async def economia_teste_error(ctx: commands.Context, error: commands.CommandErr
 @bot.command(name="guia")
 async def guia(ctx: commands.Context) -> None:
     await ctx.send(
-        "**Núcleo C — Fase 1 ativa.**\n"
-        "Comandos: `!dominio`, `!coletar`, `!treinar`, `!melhorar`, `!doutrina`, `!recrutar_general`, `!equipar_general`, `!recrutar_estrategista`, `!equipar_estrategista`, `!forjar`, `!simular_operacao`, `!rank`, `!economia_teste`, `!diagnostico`, `!guia`.\n"
-        "Loop: Coletar → Melhorar → Treinar → Rank."
+        "**Núcleo C — Fluxo clique-first ativo.**\n"
+        "Comandos públicos: `!dominio`, `!rank`, `!guia`.\n"
+        "Entre por `!dominio` e use os botões para jogar: Resgatar, Treinar, Construções, Militar e Operações.\n"
+        "Loop: Resgatar → Construções/Militar → Operações → Rank."
     )
 
 
-@bot.command(name="diagnostico")
+@bot.command(name="diagnostico", hidden=True)
 @commands.has_permissions(administrator=True)
 async def diagnostico(ctx: commands.Context) -> None:
     with get_conn() as conn:
@@ -1066,7 +1379,7 @@ async def diagnostico(ctx: commands.Context) -> None:
     await ctx.send(f"Diagnóstico Fase 1\nDB: `{DB_PATH}`\n" + "\n".join(lines))
 
 
-@bot.command(name="painel_kpis")
+@bot.command(name="painel_kpis", hidden=True)
 @commands.has_permissions(administrator=True)
 async def painel_kpis(ctx: commands.Context) -> None:
     week_ago = now_ts() - (7 * 24 * 3600)
