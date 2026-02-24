@@ -40,3 +40,11 @@ Mudança de doutrina e de slots altera `power` e impacta o resultado esperado da
 - Gate elegante aplicado em `tumba_sultao`:
   - requer Casernas T3+, General e Estrategista para rota completa;
   - sem estrategista, operação segue com rota parcial (mais risco e menor recompensa).
+
+
+## Operações canônicas (5 exemplos com requisito claro)
+- **Tumba do Sultão da Caravana** — Casernas T3+, General, Estrategista. Foco: relíquias e fragmentos históricos.
+- **Ruínas da Muralha Viva** — Celeiros T4+, Doutrina Cerco. Foco: equipamento de legião (set defensivo).
+- **Poço dos Nomes Perdidos** — Forja T4+, General Arcano. Foco: entidade rara e alto prestígio.
+- **Estrada das Sete Cinzas** — Tropa mínima + Doutrina Furtiva. Foco: ouro bruto com risco de emboscada.
+- **Fortim do Sol Negro** — Feudo T6+, Set de Legião 3/5. Foco: título sazonal e chance de drop SSS+.

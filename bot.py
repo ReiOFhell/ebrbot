@@ -265,6 +265,13 @@ def init_db() -> None:
         ensure_column(conn, "operations", "requires_general", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "operations", "prestige_reward", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "operations", "partial_without_strategist", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "operations", "min_barn_level", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "operations", "min_forge_level", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "operations", "min_feudo_tier", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "operations", "required_doctrine", "TEXT")
+        ensure_column(conn, "operations", "min_troops", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "operations", "requires_arcane_general", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "operations", "required_legion_set_pieces", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "season_scores", "updated_at_ts", "INTEGER NOT NULL DEFAULT 0")
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_operation_runs_user ON operation_runs(user_id)")
@@ -277,11 +284,18 @@ def init_db() -> None:
         # seeds mínimos
         conn.execute(
             """
-            INSERT OR IGNORE INTO operations (key, title, min_barracks_level, requires_strategist, base_gold_reward, base_risk_percent)
+            INSERT OR IGNORE INTO operations (
+                key, title, min_barracks_level, min_barn_level, min_forge_level, min_feudo_tier,
+                min_troops, requires_general, requires_arcane_general, requires_strategist,
+                partial_without_strategist, required_doctrine, required_legion_set_pieces,
+                base_gold_reward, base_risk_percent, difficulty_power, preferred_doctrine, prestige_reward
+            )
             VALUES
-            ('tumba_sultao', 'Tumba do Sultão da Caravana', 3, 1, 300000, 0.12),
-            ('ruinas_muralha', 'Ruínas da Muralha Viva', 4, 0, 450000, 0.09),
-            ('estrada_cinzas', 'Estrada das Sete Cinzas', 2, 0, 180000, 0.10)
+            ('tumba_sultao', 'Tumba do Sultão da Caravana', 3, 1, 1, 1, 300, 1, 0, 1, 1, NULL, 0, 300000, 0.12, 2200, 'furtivo', 10),
+            ('ruinas_muralha', 'Ruínas da Muralha Viva', 4, 4, 1, 1, 500, 0, 0, 0, 0, 'cerco', 0, 450000, 0.09, 3500, 'cerco', 14),
+            ('poco_nomes', 'Poço dos Nomes Perdidos', 3, 1, 4, 1, 600, 1, 1, 0, 0, 'arcano', 0, 380000, 0.11, 3300, 'arcano', 18),
+            ('estrada_cinzas', 'Estrada das Sete Cinzas', 2, 1, 1, 1, 250, 0, 0, 0, 0, 'furtivo', 0, 180000, 0.10, 1600, 'choque', 6),
+            ('fortim_sol_negro', 'Fortim do Sol Negro', 5, 1, 1, 6, 900, 1, 0, 1, 0, NULL, 3, 520000, 0.14, 4200, 'choque', 22)
             """
         )
         conn.execute(
@@ -605,6 +619,10 @@ def do_simular_operacao(user_id: str, key: str) -> str:
     return gameplay.do_simular_operacao(user_id, key)
 
 
+def get_operation_status(user_id: str, key: str) -> str:
+    return gameplay.get_operation_status(user_id, key)
+
+
 def build_rank_embed() -> discord.Embed:
     with get_conn() as conn:
         rich = conn.execute(
@@ -735,16 +753,7 @@ def build_operacoes_embed(user_id: str, notice: str | None = None) -> discord.Em
         ops = conn.execute("SELECT * FROM operations ORDER BY id").fetchall()
     lines: list[str] = []
     for op in ops:
-        status = "✅ disponível"
-        if d["barracks_level"] < op["min_barracks_level"]:
-            status = f"🔒 Casernas T{op['min_barracks_level']}+"
-        elif op["requires_general"] and not d["general_id"]:
-            status = "🔒 requer general equipado"
-        elif op["requires_strategist"] and not d["strategist_id"]:
-            if op["partial_without_strategist"]:
-                status = "⚠️ sem estrategista: apenas rota parcial"
-            else:
-                status = "🔒 requer estrategista equipado"
+        status = get_operation_status(user_id, op["key"])
         lines.append(f"• `{op['key']}` — {status}")
 
     embed = discord.Embed(title="⚔️ Painel de Operações", color=discord.Color.dark_red())
@@ -851,7 +860,7 @@ async def equipar_estrategista(ctx: commands.Context, strategist_id: int | None 
 @bot.command(name="simular_operacao", hidden=True)
 async def simular_operacao(ctx: commands.Context, key: str | None = None) -> None:
     if not key:
-        await ctx.send("Uso: `!simular_operacao <tumba_sultao|ruinas_muralha|estrada_cinzas>`")
+        await ctx.send("Uso: `!simular_operacao <tumba_sultao|ruinas_muralha|poco_nomes|estrada_cinzas|fortim_sol_negro>`")
         return
     await ctx.send(do_simular_operacao(str(ctx.author.id), key))
 
@@ -983,7 +992,7 @@ async def guia(ctx: commands.Context) -> None:
             "`!doutrina <cerco|choque|furtivo|arcano>`\n"
             "`!recrutar_general <nome>` • `!equipar_general <id>`\n"
             "`!recrutar_estrategista <nome>` • `!equipar_estrategista <id>`\n"
-            "`!simular_operacao <tumba_sultao|ruinas_muralha|estrada_cinzas>`\n"
+            "`!simular_operacao <tumba_sultao|ruinas_muralha|poco_nomes|estrada_cinzas|fortim_sol_negro>`\n"
             "`!forjar` • `!cronicas`"
         ),
         inline=False,

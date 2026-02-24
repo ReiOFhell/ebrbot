@@ -192,38 +192,114 @@ class GameplayService:
         }
         return aliases.get(key, key)
 
+    def _operation_fields(self, op: sqlite3.Row) -> dict[str, object]:
+        return {
+            "key": op["key"],
+            "title": op["title"],
+            "min_barracks_level": int(op["min_barracks_level"] or 1),
+            "min_barn_level": int(op["min_barn_level"] or 1),
+            "min_forge_level": int(op["min_forge_level"] or 1),
+            "min_feudo_tier": int(op["min_feudo_tier"] or 1),
+            "requires_general": int(op["requires_general"] or 0),
+            "requires_arcane_general": int(op["requires_arcane_general"] or 0),
+            "requires_strategist": int(op["requires_strategist"] or 0),
+            "partial_without_strategist": int(op["partial_without_strategist"] or 0),
+            "required_doctrine": op["required_doctrine"],
+            "required_legion_set_pieces": int(op["required_legion_set_pieces"] or 0),
+            "min_troops": int(op["min_troops"] or 0),
+            "difficulty_power": int(op["difficulty_power"] or 1000),
+            "base_risk_percent": float(op["base_risk_percent"] or 0.1),
+            "base_gold_reward": int(op["base_gold_reward"] or 0),
+            "prestige_reward": int(op["prestige_reward"] or 0),
+            "preferred_doctrine": op["preferred_doctrine"],
+        }
+
+    def _count_legion_set_pieces(self, conn: sqlite3.Connection, user_id: str) -> int:
+        row = conn.execute(
+            """
+            SELECT COUNT(DISTINCT i.key) AS c
+            FROM inventories inv
+            JOIN items i ON i.id = inv.item_id
+            WHERE inv.user_id = ?
+              AND inv.quantity > 0
+              AND i.key IN (
+                'elmo_basalto',
+                'lamina_juramento_quebrado',
+                'insignia_setima_caravana',
+                'selo_sal_nahr',
+                'mascara_estrategista_cego'
+              )
+            """,
+            (user_id,),
+        ).fetchone()
+        return int(row["c"] if row else 0)
+
+    def _operation_gate(self, d: sqlite3.Row, opf: dict[str, object], conn: sqlite3.Connection) -> tuple[str | None, bool]:
+        if d["barracks_level"] < opf["min_barracks_level"]:
+            return f"Requisito ausente: Casernas T{opf['min_barracks_level']}+.", False
+        if d["barn_level"] < opf["min_barn_level"]:
+            return f"Requisito ausente: Celeiros T{opf['min_barn_level']}+.", False
+        if d["forge_level"] < opf["min_forge_level"]:
+            return f"Requisito ausente: Forja T{opf['min_forge_level']}+.", False
+
+        feudo_tier = min(d["barn_level"], d["barracks_level"], d["forge_level"])
+        if feudo_tier < opf["min_feudo_tier"]:
+            return f"Requisito ausente: Feudo T{opf['min_feudo_tier']}+.", False
+        if d["troops"] < opf["min_troops"]:
+            return f"Requisito ausente: tropa mínima de {opf['min_troops']}.", False
+
+        required_doctrine = opf["required_doctrine"]
+        if required_doctrine and d["doctrine"] != required_doctrine:
+            return f"Requisito ausente: Doutrina {required_doctrine}.", False
+
+        if opf["requires_general"] and not d["general_id"]:
+            return "Requisito ausente: General equipado para esta operação.", False
+        if opf["requires_arcane_general"] and (not d["general_id"] or d["doctrine"] != "arcano"):
+            return "Requisito ausente: General Arcano (general equipado + doutrina arcano).", False
+
+        pieces_need = opf["required_legion_set_pieces"]
+        if pieces_need > 0:
+            pieces_have = self._count_legion_set_pieces(conn, d["user_id"])
+            if pieces_have < pieces_need:
+                return f"Requisito ausente: Set de Legião {pieces_need}/5 (atual {pieces_have}/5).", False
+
+        if opf["requires_strategist"] and not d["strategist_id"]:
+            if opf["partial_without_strategist"]:
+                return None, True
+            return "Requisito ausente: Estrategista equipado para esta operação.", False
+
+        return None, False
+
+    def get_operation_status(self, user_id: str, op_key: str) -> str:
+        d = self.get_or_create_domain(user_id)
+        with self.get_conn() as conn:
+            op = conn.execute("SELECT * FROM operations WHERE key = ?", (op_key,)).fetchone()
+            if not op:
+                return "❌ indisponível"
+            opf = self._operation_fields(op)
+            blocker, partial = self._operation_gate(d, opf, conn)
+        if blocker:
+            return f"🔒 {blocker}"
+        if partial:
+            return "⚠️ sem estrategista: apenas rota parcial"
+        return "✅ disponível"
+
     def do_simular_operacao(self, user_id: str, key: str) -> str:
         d = self.get_or_create_domain(user_id)
         with self.get_conn() as conn:
             op_key = self._normalize_operation_key(key)
             op = conn.execute("SELECT * FROM operations WHERE key = ?", (op_key,)).fetchone()
             if not op:
-                return "❌ Operação inválida. Use: tumba_sultao, ruinas_muralha, estrada_cinzas."
-            min_barracks_level = int(op["min_barracks_level"] or 1)
-            requires_general = int(op["requires_general"] or 0)
-            requires_strategist = int(op["requires_strategist"] or 0)
-            partial_without_strategist = int(op["partial_without_strategist"] or 0)
-            difficulty_power = int(op["difficulty_power"] or 1000)
-            base_risk_percent = float(op["base_risk_percent"] or 0.1)
-            base_gold_reward = int(op["base_gold_reward"] or 0)
-            prestige_reward = int(op["prestige_reward"] or 0)
-            preferred_doctrine = op["preferred_doctrine"]
+                return "❌ Operação inválida. Use: tumba_sultao, ruinas_muralha, poco_nomes, estrada_cinzas, fortim_sol_negro."
 
-            if d["barracks_level"] < min_barracks_level:
-                return f"❌ Requisito ausente: Casernas T{min_barracks_level}+."
-            if requires_general and not d["general_id"]:
-                return "❌ Requisito ausente: General equipado para esta operação."
-            if d["troops"] <= 0:
-                return "❌ Requisito ausente: sem tropas não há incursão."
-            chance = simulate_operation_success_chance(d["power"], difficulty_power, d["doctrine"], preferred_doctrine)
+            opf = self._operation_fields(op)
+            blocker, partial_route = self._operation_gate(d, opf, conn)
+            if blocker:
+                return f"❌ {blocker}"
 
-            partial_route = False
-            if requires_strategist and not d["strategist_id"]:
-                if partial_without_strategist:
-                    partial_route = True
-                    chance *= 0.55
-                else:
-                    return "❌ Requisito ausente: Estrategista equipado para esta operação."
+            chance = simulate_operation_success_chance(d["power"], opf["difficulty_power"], d["doctrine"], opf["preferred_doctrine"])
+            if partial_route:
+                chance *= 0.55
 
         outcome = "vitória tática" if random.random() <= chance else "falha tática"
         risk_mult = 1.0
@@ -236,9 +312,9 @@ class GameplayService:
             prestige_mult = 0.35
             route_line = "Rota parcial: sem estrategista, retorno incompleto."
 
-        troops_lost = int(max(1, d["troops"] * base_risk_percent * (0.4 if outcome == "vitória tática" else 0.8) * risk_mult))
-        base_gold_delta = int(base_gold_reward * (1.0 if outcome == "vitória tática" else 0.2) * reward_mult)
-        prestige_gain = int(prestige_reward * (1.0 if outcome == "vitória tática" else 0.4) * prestige_mult)
+        troops_lost = int(max(1, d["troops"] * opf["base_risk_percent"] * (0.4 if outcome == "vitória tática" else 0.8) * risk_mult))
+        base_gold_delta = int(opf["base_gold_reward"] * (1.0 if outcome == "vitória tática" else 0.2) * reward_mult)
+        prestige_gain = int(opf["prestige_reward"] * (1.0 if outcome == "vitória tática" else 0.4) * prestige_mult)
         forge_mult = 1.0 + (d["forge_level"] - 1) * 0.03
         gold_delta = int(base_gold_delta * forge_mult)
 
@@ -267,7 +343,7 @@ class GameplayService:
         return (
             f"🧪 Simulação `{op['title']}`\n"
             f"{route_line}\n"
-            f"Poder atual: {d['power']:,} | Dificuldade: {difficulty_power:,}\n"
+            f"Poder atual: {d['power']:,} | Dificuldade: {opf['difficulty_power']:,}\n"
             f"Chance estimada: {chance*100:.1f}%\n"
             f"Resultado simulado: **{outcome}**\n"
             f"Registro: perdas estimadas {troops_lost:,} tropas | recompensa base {gold_delta:,} ouro | prestígio +{prestige_gain:,}\n"
