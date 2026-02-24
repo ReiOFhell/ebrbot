@@ -501,6 +501,25 @@ class DominioView(discord.ui.View):
                 embed=self.deps.build_operacoes_embed(user_id, None),
                 view=OperacoesView(author_id=interaction.user.id, deps=self.deps),
             )
+        except Exception as exc:
+            self.deps.log_command_error(user_id, "operacoes_open", exc)
+            self.deps.log_panel_event(
+                user_id=user_id,
+                guild_id=guild_id,
+                event_name="panel_error",
+                event_action="operacoes",
+                error_code="interaction_failure",
+            )
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    f"<@{interaction.user.id}> ❌ Falha ao abrir painel de operações. Use `!diagnostico` (admin).",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    f"<@{interaction.user.id}> ❌ Falha ao abrir painel de operações. Use `!diagnostico` (admin).",
+                    ephemeral=True,
+                )
         finally:
             ActionGuard.leave(user_id, "operacoes")
 
