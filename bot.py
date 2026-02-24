@@ -70,6 +70,43 @@ def ensure_column(conn: sqlite3.Connection, table: str, col: str, ddl: str) -> N
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
 
 
+
+
+def build_legacy_safe_insert_values(conn: sqlite3.Connection, table: str, *, user_id: str, ts: int) -> dict[str, object]:
+    values: dict[str, object] = {}
+    cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    for col in cols:
+        name = str(col[1])
+        notnull = int(col[3] or 0) == 1
+        default = col[4]
+
+        if name == "user_id":
+            values[name] = user_id
+            continue
+        if name == "created_at_ts":
+            values[name] = ts
+            continue
+
+        if notnull and default is None:
+            lname = name.lower()
+            if lname.endswith("_ts"):
+                values[name] = ts
+            elif lname.endswith("_id"):
+                values[name] = user_id
+            elif lname.startswith("is_"):
+                values[name] = 0
+            else:
+                values[name] = 0
+
+    return values
+
+
+def insert_row_legacy_safe(conn: sqlite3.Connection, table: str, *, user_id: str, ts: int) -> None:
+    values = build_legacy_safe_insert_values(conn, table, user_id=user_id, ts=ts)
+    cols = ", ".join(values.keys())
+    placeholders = ", ".join("?" for _ in values)
+    conn.execute(f"INSERT INTO {table} ({cols}) VALUES ({placeholders})", tuple(values.values()))
+
 def init_db() -> None:
     with get_conn() as conn:
         # 1) estado principal por jogador
@@ -497,7 +534,7 @@ def get_or_create_domain(user_id: str) -> sqlite3.Row:
         # Migração defensiva: contas antigas podem existir em `domains` sem linhas irmãs.
         domain = conn.execute("SELECT * FROM domains WHERE user_id = ?", (user_id,)).fetchone()
         if not domain:
-            conn.execute("INSERT INTO domains (user_id, created_at_ts) VALUES (?, ?)", (user_id, ts))
+            insert_row_legacy_safe(conn, "domains", user_id=user_id, ts=ts)
 
         # Garante linhas relacionadas mesmo para usuários já existentes de versões anteriores.
         conn.execute(
