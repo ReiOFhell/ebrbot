@@ -7,6 +7,13 @@ from typing import Any, Callable
 import discord
 
 
+async def _send_ephemeral_interaction_error(interaction: discord.Interaction, message: str) -> None:
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True)
+    else:
+        await interaction.response.send_message(message, ephemeral=True)
+
+
 @dataclass
 class PanelDeps:
     service: Any
@@ -307,16 +314,10 @@ class OperationSelect(discord.ui.Select):
                 event_action=f"operacao_select:{value}",
                 error_code="interaction_failure",
             )
-            if interaction.response.is_done():
-                await interaction.followup.send(
-                    f"<@{interaction.user.id}> ❌ Falha ao processar operação. Use `!diagnostico` (admin).",
-                    ephemeral=True,
-                )
-            else:
-                await interaction.response.send_message(
-                    f"<@{interaction.user.id}> ❌ Falha ao processar operação. Use `!diagnostico` (admin).",
-                    ephemeral=True,
-                )
+            await _send_ephemeral_interaction_error(
+                interaction,
+                f"<@{interaction.user.id}> ❌ Falha ao processar operação. Use `!diagnostico` (admin).",
+            )
 
 
 class OperacoesView(discord.ui.View):
@@ -510,16 +511,10 @@ class DominioView(discord.ui.View):
                 event_action="operacoes",
                 error_code="interaction_failure",
             )
-            if interaction.response.is_done():
-                await interaction.followup.send(
-                    f"<@{interaction.user.id}> ❌ Falha ao abrir painel de operações. Use `!diagnostico` (admin).",
-                    ephemeral=True,
-                )
-            else:
-                await interaction.response.send_message(
-                    f"<@{interaction.user.id}> ❌ Falha ao abrir painel de operações. Use `!diagnostico` (admin).",
-                    ephemeral=True,
-                )
+            await _send_ephemeral_interaction_error(
+                interaction,
+                f"<@{interaction.user.id}> ❌ Falha ao abrir painel de operações. Use `!diagnostico` (admin).",
+            )
         finally:
             ActionGuard.leave(user_id, "operacoes")
 
