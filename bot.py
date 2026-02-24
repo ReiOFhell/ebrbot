@@ -502,6 +502,85 @@ def build_rank_embed() -> discord.Embed:
     return embed
 
 
+def build_dominio_embed(user_id: str) -> discord.Embed:
+    d = get_or_create_domain(user_id)
+    snap = economy_snapshot(
+        barn_level=d["barn_level"],
+        barracks_level=d["barracks_level"],
+        forge_level=d["forge_level"],
+        troops=d["troops"],
+    )
+
+    embed = discord.Embed(title="🏰 Domínio Imperial", color=discord.Color.dark_gold())
+    embed.add_field(
+        name="Recursos",
+        value=(
+            f"🪙 Ouro: **{d['gold']:,}**\n"
+            f"⚙️ Manutenção/h: **{snap.total_maintenance_per_hour:,}**\n"
+            f"📈 Saldo líquido/h: **{snap.net_per_hour:,}**"
+        ).replace(",", "."),
+        inline=False,
+    )
+    embed.add_field(
+        name="Estruturas",
+        value=(
+            f"🌾 Celeiros T{d['barn_level']}\n"
+            f"🛡️ Casernas T{d['barracks_level']}\n"
+            f"🔨 Forja T{d['forge_level']}"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Militar",
+        value=(
+            f"👥 Tropas: **{d['troops']:,}**\n"
+            f"⚔️ Poder: **{d['power']:,}**\n"
+            f"🧭 Doutrina: **{d['doctrine']}**\n"
+            f"🎖️ General slot: **{d['general_id'] or 'vazio'}**\n"
+            f"📐 Estrategista slot: **{d['strategist_id'] or 'vazio'}**"
+        ).replace(",", "."),
+        inline=False,
+    )
+    embed.set_footer(text="Botões: Resgatar • Treinar • Construções • Militar • Operações • Rank")
+    return embed
+
+
+def build_construcoes_embed(user_id: str) -> discord.Embed:
+    d = get_or_create_domain(user_id)
+
+    def next_cost(kind: str, level: int) -> str:
+        if level >= MAX_BUILDING_TIER:
+            return "máximo"
+        return f"{building_upgrade_cost(level, kind):,} ouro".replace(",", ".")
+
+    embed = discord.Embed(title="🏗️ Painel de Construções", color=discord.Color.orange())
+    embed.description = (
+        f"🌾 Celeiros T{d['barn_level']} • próximo: {next_cost('celeiros', d['barn_level'])}\n"
+        f"🛡️ Casernas T{d['barracks_level']} • próximo: {next_cost('casernas', d['barracks_level'])}\n"
+        f"🔨 Forja T{d['forge_level']} • próximo: {next_cost('forja', d['forge_level'])}\n\n"
+        "Use `!melhorar <celeiros|casernas|forja>` para upgrade."
+    )
+    embed.set_footer(text="Botão voltar retorna ao painel principal")
+    return embed
+
+
+class ConstrucoesView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=180)
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Apenas o dono do painel pode usar estes botões.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="⬅️ Voltar", style=discord.ButtonStyle.primary)
+    async def btn_voltar(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        embed = build_dominio_embed(str(interaction.user.id))
+        await interaction.response.edit_message(embed=embed, view=DominioView(author_id=interaction.user.id))
+
+
 class DominioView(discord.ui.View):
     def __init__(self, author_id: int):
         super().__init__(timeout=180)
@@ -550,15 +629,8 @@ class DominioView(discord.ui.View):
             event_name="panel_action",
             event_action="construcoes",
         )
-        d = get_or_create_domain(str(interaction.user.id))
-        await interaction.response.send_message(
-            (
-                "✅ Painel de construções aberto.\n"
-                f"Δ Celeiros T{d['barn_level']} | Casernas T{d['barracks_level']} | Forja T{d['forge_level']}\n"
-                "Próximo: use `!melhorar <celeiros|casernas|forja>`"
-            ),
-            ephemeral=True,
-        )
+        embed = build_construcoes_embed(str(interaction.user.id))
+        await interaction.response.edit_message(embed=embed, view=ConstrucoesView(author_id=interaction.user.id))
 
     @discord.ui.button(label="Militar", style=discord.ButtonStyle.secondary)
     async def btn_militar(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -624,35 +696,7 @@ async def dominio(ctx: commands.Context) -> None:
         event_name="panel_open",
         event_action="dominio",
     )
-    d = get_or_create_domain(str(ctx.author.id))
-    snap = economy_snapshot(
-        barn_level=d["barn_level"],
-        barracks_level=d["barracks_level"],
-        forge_level=d["forge_level"],
-        troops=d["troops"],
-    )
-
-    embed = discord.Embed(title="🏰 Domínio Imperial", color=discord.Color.dark_gold())
-    embed.add_field(
-        name="Recursos",
-        value=(
-            f"🪙 Ouro: **{d['gold']:,}**\n"
-            f"⚙️ Manutenção/h: **{snap.total_maintenance_per_hour:,}**\n"
-            f"📈 Saldo líquido/h: **{snap.net_per_hour:,}**"
-        ).replace(",", "."),
-        inline=False,
-    )
-    embed.add_field(
-        name="Estruturas",
-        value=(
-            f"🌾 Celeiros T{d['barn_level']}\n"
-            f"🛡️ Casernas T{d['barracks_level']}\n"
-            f"🔨 Forja T{d['forge_level']}"
-        ),
-        inline=False,
-    )
-    embed.add_field(name="Militar", value=(f"👥 Tropas: **{d['troops']:,}**\n⚔️ Poder: **{d['power']:,}**\n🧭 Doutrina: **{d['doctrine']}**\n🎖️ General slot: **{d['general_id'] or 'vazio'}**\n📐 Estrategista slot: **{d['strategist_id'] or 'vazio'}**").replace(",", "."), inline=False)
-    embed.set_footer(text="Botões: Resgatar • Treinar • Construções • Militar • Operações • Rank")
+    embed = build_dominio_embed(str(ctx.author.id))
     await ctx.send(embed=embed, view=DominioView(author_id=ctx.author.id))
 
 
