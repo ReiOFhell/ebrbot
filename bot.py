@@ -288,13 +288,32 @@ def init_db() -> None:
             """
             INSERT OR IGNORE INTO items (key, name, rarity, lore)
             VALUES
-            ('pergaminho_rasgado_i', 'Pergaminho Rasgado I', 'C', 'O Trono não respondeu.'),
+            ('pergaminho_rasgado_i', 'Pergaminho Rasgado I — O Trono Silenciou', 'C', 'Juraram lealdade ao Trono. O Trono não respondeu.'),
+            ('pergaminho_rasgado_ii', 'Pergaminho Rasgado II — Cinza no Estandarte', 'C', 'A bandeira queimou antes da batalha começar.'),
             ('elmo_basalto', 'Elmo do Basalto', 'R', 'Usado quando a muralha ainda respirava.'),
-            ('cronica_heroi_sem_tumulo', 'Crônica do Herói Sem Túmulo', 'L', 'Salvou o mundo e perdeu o nome.'),
-            ('selo_legiao_ss', 'Selo Quebrado da Legião', 'SS', 'Um juramento que ainda sangra no metal.'),
-            ('estandarte_sss', 'Estandarte da Vigília Ausente', 'SSS', 'Quando caiu, ninguém ousou recolher.'),
-            ('lamina_sssp', 'Lâmina da Era Velada', 'SSS+', 'A lâmina lembra nomes que o mundo apagou.'),
-            ('trono_99999', 'Fragmento do Trono Impronunciável', '99999', 'Não foi encontrado. Foi permitido.')
+            ('lamina_juramento_quebrado', 'Lâmina do Juramento Quebrado', 'SSS', 'Quem a empunha vence; quem vence paga.'),
+            ('insignia_setima_caravana', 'Insígnia da Sétima Caravana', 'R', 'Ninguém viu a sétima partir. Todos viram ela chegar.'),
+            ('manopla_lorde_demonio_tanque', 'Manopla do Lorde-Demônio de Tanque', '99999', 'Não foi forjada. Foi lembrada.'),
+            ('mascara_estrategista_cego', 'Máscara do Estrategista Cego', 'SSS+', 'Ele não via o mapa; via o fim.'),
+            ('cronica_heroi_sem_tumulo', 'Crônica do Herói Sem Túmulo', 'SSS+', 'Salvou o mundo e perdeu o nome.'),
+            ('selo_sal_nahr', 'Selo de Sal de Nahr', 'SS', 'Onde o sal cai, a memória acorda.'),
+            ('fragmento_pacto_primordial', 'Fragmento do Pacto Primordial', '99999', 'O primeiro pacto não foi assinado por mãos humanas.')
+            """
+        )
+
+        # Canonização dos 10 micro-lores (compatível com bases já existentes)
+        conn.execute(
+            """
+            UPDATE items SET name = 'Pergaminho Rasgado I — O Trono Silenciou', rarity = 'C',
+                lore = 'Juraram lealdade ao Trono. O Trono não respondeu.'
+            WHERE key = 'pergaminho_rasgado_i'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE items SET name = 'Crônica do Herói Sem Túmulo', rarity = 'SSS+',
+                lore = 'Salvou o mundo e perdeu o nome.'
+            WHERE key = 'cronica_heroi_sem_tumulo'
             """
         )
 
