@@ -927,12 +927,71 @@ async def economia_teste_error(ctx: commands.Context, error: commands.CommandErr
 
 @bot.command(name="guia")
 async def guia(ctx: commands.Context) -> None:
-    await ctx.send(
-        "**Núcleo C — Fluxo clique-first ativo.**\n"
-        "Comandos públicos: `!dominio`, `!rank`, `!guia`.\n"
-        "Entre por `!dominio` e use os botões para jogar: Resgatar, Treinar, Construções, Militar e Operações.\n"
-        "Loop: Resgatar → Construções/Militar → Operações → Rank."
+    embed = discord.Embed(
+        title="📘 Guia do Feudo — EBR Núcleo C",
+        description=(
+            "Entrada recomendada: `!dominio` (painel central).\n"
+            "Você joga quase tudo por botões: **Resgatar → Construções/Militar → Operações → Rank**."
+        ),
+        color=discord.Color.dark_gold(),
     )
+    embed.add_field(
+        name="Comece em 30 segundos",
+        value=(
+            "1) `!dominio` abre seu painel\n"
+            "2) clique em **Resgatar** para gerar ouro\n"
+            "3) clique em **Construções** e use `🛠️ Melhorar`\n"
+            "4) clique em **Militar** para definir doutrina/slots\n"
+            "5) clique em **Operações** para simular incursões"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Comandos públicos (uso normal)",
+        value=(
+            "`!dominio` → painel principal do feudo\n"
+            "`!rank` → ranking de riqueza e poder\n"
+            "`!guia` → este guia"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Comandos avançados (atalhos textuais)",
+        value=(
+            "`!coletar` • `!treinar` • `!melhorar <celeiros|casernas|forja>`\n"
+            "`!doutrina <cerco|choque|furtivo|arcano>`\n"
+            "`!recrutar_general <nome>` • `!equipar_general <id>`\n"
+            "`!recrutar_estrategista <nome>` • `!equipar_estrategista <id>`\n"
+            "`!simular_operacao <tumba_sultao|ruinas_muralha|estrada_cinzas>`\n"
+            "`!forjar` • `!anais`"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Como evoluir rápido",
+        value=(
+            "• Sem ouro, seu progresso trava (priorize **Resgatar** + **Celeiros**)\n"
+            "• Sem tropa, não há incursão (fortaleça **Casernas**)\n"
+            "• Sem forja, menos chance de achados raros (suba **Forja**)\n"
+            "• Operações exigem composição real (General/Estrategista em gates)"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Operações (raids narrativas)",
+        value=(
+            "Cada operação tem **requisito + risco + recompensa**.\n"
+            "Ex.: `tumba_sultao` pede Casernas T3+, General e Estrategista para rota completa."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Comandos admin",
+        value="`!diagnostico` • `!painel_kpis` • `!economia_teste`",
+        inline=False,
+    )
+    embed.set_footer(text="Dica: se uma subview expirar, use o botão 🔄 Reabrir Painel")
+    await ctx.send(embed=embed)
 
 
 @bot.command(name="diagnostico", hidden=True)
