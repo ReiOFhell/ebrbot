@@ -24,11 +24,18 @@ from services.gameplay import GameplayService
 from ui.views import DominioView as UIDominioView, PanelDeps
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-logger = logging.getLogger("ebr.nucleoc")
+logger = logging.getLogger("nexar.bot")
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "nucleoc.db"
+
+APP_NAME = "NEXAR"
+APP_SLOGAN = "Aposte no seu progresso."
+APP_PRESENCE = f"{APP_NAME} | !dominio"
+APP_SHORT_DESCRIPTION = (
+    "Bot global de progressão estratégica: domínio, operações reais e ranking de riqueza/poder/prestígio."
+)
 
 DISCORD_TOKEN_FALLBACK = ""  # opcional: cole aqui apenas para teste local
 
@@ -1368,7 +1375,7 @@ async def addouro_error(ctx: commands.Context, error: commands.CommandError) -> 
 
 def build_admin_embed() -> discord.Embed:
     embed = discord.Embed(
-        title="🛠️ Painel de Administração — EBR Grimório",
+        title=f"🛠️ Painel de Administração — {APP_NAME}",
         description="Hub administrativo com comandos completos, uso e finalidade.",
         color=discord.Color.dark_red(),
     )
@@ -1453,15 +1460,15 @@ async def economia_teste_error(ctx: commands.Context, error: commands.CommandErr
 
 GUIDE_PAGES: list[tuple[str, str]] = [
     (
-        "📘 Guia do Feudo — Página 1/3",
+        f"📘 Guia do {APP_NAME} — Página 1/3",
         "**Comece aqui (10 segundos)**\n"
         "1) Use `!dominio` para abrir o painel central.\n"
-        "2) Clique em **Resgatar** para gerar ouro.\n"
+        "2) Clique em **Resgatar** para gerar ouro e ritmo de progresso.\n"
         "3) Clique em **Construções** para melhorar Celeiros/Casernas/Forja.\n\n"
         "**Próximo passo claro:** fortalecer economia e voltar ao painel.",
     ),
     (
-        "📘 Guia do Feudo — Página 2/3",
+        f"📘 Guia do {APP_NAME} — Página 2/3",
         "**Progressão visível (3 eixos)**\n"
         "• **Riqueza**: ouro para upgrades e manutenção.\n"
         "• **Poder**: tropas + doutrina + General canônico + estrategista.\n"
@@ -1469,11 +1476,12 @@ GUIDE_PAGES: list[tuple[str, str]] = [
         "**Próximo passo claro:** ajuste doutrina no painel Militar e simule Operações.",
     ),
     (
-        "📘 Guia do Feudo — Página 3/3",
+        f"📘 Guia do {APP_NAME} — Página 3/3",
         "**Comandos públicos**\n"
         "`!dominio` → jogar o núcleo inteiro por clique\n"
         "`!rank` → comparar riqueza/poder/prestígio\n"
         "`!guia` → onboarding por páginas\n\n"
+        f"**{APP_NAME}:** {APP_SLOGAN}\n"
         "**Admin (oculto):** `!admin`, `!addouro`, `!diagnostico`, `!painel_kpis`, `!economia_teste`, `!decreto_soberano`\n"
         "**Dica:** se uma view expirar, use `🔄 Reabrir Painel`.",
     ),
@@ -1736,7 +1744,9 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
 
 @bot.event
 async def on_ready() -> None:
-    logger.info("Conectado como %s", bot.user)
+    activity = discord.Game(name=APP_PRESENCE)
+    await bot.change_presence(activity=activity)
+    logger.info("Conectado como %s | %s", bot.user, APP_SHORT_DESCRIPTION)
 
 
 def main() -> None:

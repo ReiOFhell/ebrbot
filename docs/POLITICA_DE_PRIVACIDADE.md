@@ -1,11 +1,11 @@
-# Política de Privacidade — EBR Grimório (Discord Bot)
+# Política de Privacidade — NEXAR (Discord Bot)
 
 **Última atualização:** 25/02/2026
 
-Esta Política explica quais dados o bot **EBR Grimório** trata, por quê e como.
+Esta Política explica quais dados o bot **NEXAR** trata, por quê e como.
 
 ## 1. Controlador/Responsável
-O tratamento de dados é realizado pela equipe administradora do projeto **EBR — Eternal Brazilian Royal** no contexto de operação do bot no Discord.
+O tratamento de dados é realizado pela equipe administradora do projeto **NEXAR Global Community** no contexto de operação do bot no Discord.
 
 ## 2. Dados tratados
 Para funcionar, o bot pode registrar:
@@ -49,4 +49,4 @@ Esta Política pode ser atualizada para refletir mudanças técnicas, legais ou 
 A versão vigente será a indicada no topo deste documento.
 
 ## 10. Contato
-Para solicitações sobre privacidade, contate a equipe administradora do servidor **EBR — Eternal Brazilian Royal**.
+Para solicitações sobre privacidade, contate a equipe administradora do servidor **NEXAR Global Community**.
