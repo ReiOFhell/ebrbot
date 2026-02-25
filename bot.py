@@ -1309,6 +1309,117 @@ async def economia_teste(ctx: commands.Context) -> None:
     )
 
 
+
+
+@bot.command(name="addouro", hidden=True)
+@commands.has_permissions(administrator=True)
+async def addouro(ctx: commands.Context, membro: discord.Member | None = None, quantidade: int | None = None) -> None:
+    if membro is None or quantidade is None:
+        await ctx.send("Uso: `!addouro @membro <quantidade>`")
+        return
+    if quantidade <= 0:
+        await ctx.send("❌ A quantidade deve ser maior que zero.")
+        return
+
+    alvo_id = str(membro.id)
+    d = get_or_create_domain(alvo_id)
+    novo_saldo = int(d["gold"] or 0) + quantidade
+    update_player_state(alvo_id, gold=novo_saldo)
+
+    await ctx.send(
+        (
+            f"<@{ctx.author.id}> ✅ Ouro adicionado para <@{membro.id}>.\n"
+            f"Δ Ouro: +{quantidade:,}\n"
+            f"Saldo atual do alvo: {novo_saldo:,}"
+        ).replace(",", ".")
+    )
+
+
+@addouro.error
+async def addouro_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Apenas administradores podem usar `!addouro`.")
+        return
+    logger.exception("Erro em !addouro", exc_info=error)
+    await ctx.send("Erro interno ao adicionar ouro.")
+
+
+def build_admin_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🛠️ Painel de Administração — EBR Grimório",
+        description="Hub administrativo com comandos completos, uso e finalidade.",
+        color=discord.Color.dark_red(),
+    )
+
+    embed.add_field(
+        name="Economia / Conta",
+        value=(
+            "`!addouro @membro <quantidade>`\n"
+            "Adiciona ouro diretamente ao feudo de qualquer jogador."
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Observabilidade",
+        value=(
+            "`!diagnostico`\n"
+            "Mostra saúde do banco e últimos erros registrados.\n\n"
+            "`!painel_kpis`\n"
+            "Métricas operacionais do painel (7 dias).\n\n"
+            "`!economia_teste`\n"
+            "Snapshot de fórmula econômica para validação técnica."
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Governança",
+        value=(
+            "`!decreto_soberano <nome> <duracao_horas> [economia_pct] [recompensa_ops_pct] [risco_ops_pct] [prestigio_pct]`\n"
+            "Aplica modificadores globais temporários com limites moderados."
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Comandos de Jogador (núcleo)",
+        value=(
+            "`!dominio` • `!rank` • `!guia` • `!temporada`\n"
+            "Fluxo recomendado: abrir painel, executar ações e comparar ranking."
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Comandos avançados/ocultos (debug e atalho)",
+        value=(
+            "`!coletar` • `!treinar` • `!melhorar <estrutura>` • `!doutrina <estilo>`\n"
+            "`!recrutar_general` • `!equipar_general` • `!evoluir_general`\n"
+            "`!recrutar_estrategista <nome>` • `!equipar_estrategista <id>` • `!evoluir_estrategista`\n"
+            "`!simular_operacao <chave>` • `!forjar` • `!cronicas`"
+        ),
+        inline=False,
+    )
+
+    embed.set_footer(text="Comando admin recomendado para consulta completa: !admin")
+    return embed
+
+
+@bot.command(name="admin", hidden=True)
+@commands.has_permissions(administrator=True)
+async def admin_panel(ctx: commands.Context) -> None:
+    await ctx.send(embed=build_admin_embed())
+
+
+@admin_panel.error
+async def admin_panel_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Apenas administradores podem usar `!admin`.")
+        return
+    logger.exception("Erro em !admin", exc_info=error)
+    await ctx.send("Erro interno no painel administrativo.")
+
 @economia_teste.error
 async def economia_teste_error(ctx: commands.Context, error: commands.CommandError) -> None:
     if isinstance(error, commands.MissingPermissions):
@@ -1341,7 +1452,7 @@ GUIDE_PAGES: list[tuple[str, str]] = [
         "`!dominio` → jogar o núcleo inteiro por clique\n"
         "`!rank` → comparar riqueza/poder/prestígio\n"
         "`!guia` → onboarding por páginas\n\n"
-        "**Admin (oculto):** `!diagnostico`, `!painel_kpis`, `!economia_teste`, `!decreto_soberano`\n"
+        "**Admin (oculto):** `!admin`, `!addouro`, `!diagnostico`, `!painel_kpis`, `!economia_teste`, `!decreto_soberano`\n"
         "**Dica:** se uma view expirar, use `🔄 Reabrir Painel`.",
     ),
 ]
