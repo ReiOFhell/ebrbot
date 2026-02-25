@@ -813,6 +813,10 @@ def do_equip_strategist(user_id: str, strategist_id: int) -> str:
     return gameplay.do_equip_strategist(user_id, strategist_id)
 
 
+def do_upgrade_strategist(user_id: str) -> str:
+    return gameplay.do_upgrade_strategist(user_id)
+
+
 def do_simular_operacao(user_id: str, key: str) -> str:
     return gameplay.do_simular_operacao(user_id, key)
 
@@ -1010,8 +1014,8 @@ def build_militar_embed(user_id: str, notice: str | None = None) -> discord.Embe
         name="Fluxo",
         value=(
             "✅ Composição militar pronta\n"
-            "Δ Evoluir General aumenta bônus de poder\n"
-            "Próximo: evolua o General ou avance para Operações"
+            "Δ Evoluir General + Estrategista amplia bônus de poder\n"
+            "Próximo: evolua ambos e avance para Operações"
         ),
         inline=False,
     )
@@ -1120,6 +1124,11 @@ async def equipar_general(ctx: commands.Context, general_id: int | None = None) 
     await ctx.send(f"<@{ctx.author.id}> ✅ General canônico já está equipado por padrão.")
 
 
+@bot.command(name="evoluir_general", hidden=True)
+async def evoluir_general(ctx: commands.Context) -> None:
+    await ctx.send(do_upgrade_general(str(ctx.author.id)))
+
+
 @bot.command(name="recrutar_estrategista", hidden=True)
 async def recrutar_estrategista(ctx: commands.Context, *, nome: str | None = None) -> None:
     if not nome:
@@ -1134,6 +1143,11 @@ async def equipar_estrategista(ctx: commands.Context, strategist_id: int | None 
         await ctx.send("Uso: `!equipar_estrategista <id>`")
         return
     await ctx.send(do_equip_strategist(str(ctx.author.id), strategist_id))
+
+
+@bot.command(name="evoluir_estrategista", hidden=True)
+async def evoluir_estrategista(ctx: commands.Context) -> None:
+    await ctx.send(do_upgrade_strategist(str(ctx.author.id)))
 
 
 @bot.command(name="simular_operacao", hidden=True)

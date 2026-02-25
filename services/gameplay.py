@@ -169,7 +169,7 @@ class GameplayService:
         who = self._who(user_id)
         d = self.get_or_create_domain(user_id)
         rank_order = ["C", "B", "A", "S", "SS"]
-        rank_cost = {"C": 80_000, "B": 180_000, "A": 420_000, "S": 950_000}
+        rank_cost = {"C": 250_000, "B": 650_000, "A": 1_800_000, "S": 4_500_000}
 
         with self.get_conn() as conn:
             gid = d["general_id"]
@@ -238,6 +238,52 @@ class GameplayService:
         new_power = recalc_power(d["troops"], d["barracks_level"], d["forge_level"], d["doctrine"], g_bonus, s_bonus)
         self.update_player_state(user_id, strategist_id=strategist_id, power=new_power)
         return f"{who} ✅ Estrategista equipado (id {strategist_id}).\nΔ Poder: {new_power:,}\nPróximo: iniciar simulação de operação".replace(",", ".")
+
+
+
+    def do_upgrade_strategist(self, user_id: str) -> str:
+        who = self._who(user_id)
+        d = self.get_or_create_domain(user_id)
+        rank_order = ["C", "B", "A", "S", "SS"]
+        rank_cost = {"C": 220_000, "B": 560_000, "A": 1_500_000, "S": 3_700_000}
+
+        with self.get_conn() as conn:
+            ok, msg = self.has_strategist_gate(d, conn)
+            if not ok:
+                return f"{who} ❌ {msg}"
+
+            sid = d["strategist_id"]
+            if not sid:
+                return f"{who} ❌ Estrategista não equipado.\nPróximo: equipe um estrategista no painel Militar"
+
+            srow = conn.execute("SELECT id, rank FROM strategists WHERE id = ? AND user_id = ?", (sid, user_id)).fetchone()
+            if not srow:
+                return f"{who} ❌ Estrategista não encontrado no feudo."
+
+            current = str(srow["rank"] or "C")
+            if current not in rank_order:
+                current = "C"
+            if current == "SS":
+                return f"{who} ❌ Estrategista já alcançou o ápice (SS).\nPróximo: evolua tropas/forja para ampliar poder"
+
+            cost = rank_cost[current]
+            if d["gold"] < cost:
+                falta = cost - d["gold"]
+                return f"{who} ❌ Ouro insuficiente para evolução do Estrategista (falta {falta:,}).\nPróximo: clique em **Resgatar**".replace(",", ".")
+
+            new_rank = rank_order[rank_order.index(current) + 1]
+            conn.execute("UPDATE strategists SET rank = ? WHERE id = ?", (new_rank, sid))
+            conn.commit()
+
+            g_bonus, s_bonus = self.get_slot_bonuses(conn, d["general_id"], sid)
+
+        new_power = recalc_power(d["troops"], d["barracks_level"], d["forge_level"], d["doctrine"], g_bonus, s_bonus)
+        self.update_player_state(user_id, gold=d["gold"] - cost, power=new_power)
+        return (
+            f"{who} ✅ Estrategista evoluído: **{current} → {new_rank}**.\n"
+            f"Δ Ouro: -{cost:,} | Poder: {new_power:,}\n"
+            "Próximo: abra **Operações** para testar a composição"
+        ).replace(",", ".")
 
     def _normalize_operation_key(self, raw_key: str) -> str:
         key = raw_key.strip().lower()
