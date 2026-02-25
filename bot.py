@@ -8,6 +8,7 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 
+from bets import setup_bets
 from core.economy import (
     TRAIN_COOLDOWN_SECONDS,
     barracks_train_amount,
@@ -53,6 +54,8 @@ intents.members = True
 intents.messages = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+raffles_service = None
+raffles_loop = None
 
 DOCTRINES = {"cerco", "choque", "furtivo", "arcano"}
 GENERAL_RANK_BONUS = {"C": 0.02, "B": 0.04, "A": 0.06, "S": 0.10}
@@ -1852,10 +1855,21 @@ async def on_ready() -> None:
     activity = discord.Game(name=APP_PRESENCE)
     await bot.change_presence(activity=activity)
     logger.info("Conectado como %s | %s", bot.user, APP_SHORT_DESCRIPTION)
+    if raffles_loop is not None:
+        raffles_loop.start()
 
 
 def main() -> None:
+    global raffles_service, raffles_loop
     init_db()
+    raffles_service, raffles_loop = setup_bets(
+        bot=bot,
+        get_conn=get_conn,
+        get_or_create_domain=get_or_create_domain,
+        update_player_state=update_player_state,
+        now_ts=now_ts,
+        logger=logger,
+    )
     try:
         token = resolve_token()
     except RuntimeError as exc:
