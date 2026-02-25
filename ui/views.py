@@ -208,7 +208,6 @@ class MilitarView(discord.ui.View):
         self.deps = deps
         user_id = str(author_id)
         self.add_item(DoctrineSelect(deps))
-        self.add_item(GeneralEquipSelect(user_id, deps))
         self.add_item(StrategistEquipSelect(user_id, deps))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -217,9 +216,9 @@ class MilitarView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="🎖️ Recrutar General", style=discord.ButtonStyle.success)
-    async def btn_recrutar_general(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        msg = self.deps.service.do_recruit_general_auto(str(interaction.user.id))
+    @discord.ui.button(label="⭐ Evoluir General", style=discord.ButtonStyle.success)
+    async def btn_upgrade_general(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        msg = self.deps.service.do_upgrade_general(str(interaction.user.id))
         await interaction.response.edit_message(
             embed=self.deps.build_militar_embed(str(interaction.user.id), msg),
             view=MilitarView(author_id=interaction.user.id, deps=self.deps),

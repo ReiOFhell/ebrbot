@@ -142,16 +142,11 @@ class GameplayService:
 
     def do_recruit_general_auto(self, user_id: str) -> str:
         who = self._who(user_id)
-        with self.get_conn() as conn:
-            count = conn.execute("SELECT COUNT(*) c FROM generals WHERE user_id = ?", (user_id,)).fetchone()["c"]
-            name = f"General #{count + 1}"
-            conn.execute(
-                "INSERT INTO generals (user_id, name, rank, equipped, created_at_ts) VALUES (?, ?, 'C', 0, ?)",
-                (user_id, name, self.now_ts()),
-            )
-            gid = conn.execute("SELECT last_insert_rowid() id").fetchone()["id"]
-            conn.commit()
-        return f"{who} ✅ General recrutado: **{name}** (id {gid}).\nΔ Slot disponível para equipar\nPróximo: selecione o general no painel".replace(",", ".")
+        return (
+            f"{who} ✅ General canônico já está vinculado ao seu feudo.\n"
+            "Δ Você evolui este mesmo General ao longo da progressão\n"
+            "Próximo: fortaleça Casernas/Forja e avance em Operações"
+        )
 
     def do_equip_general(self, user_id: str, general_id: int) -> str:
         who = self._who(user_id)
@@ -167,6 +162,47 @@ class GameplayService:
         new_power = recalc_power(d["troops"], d["barracks_level"], d["forge_level"], d["doctrine"], g_bonus, s_bonus)
         self.update_player_state(user_id, general_id=general_id, power=new_power)
         return f"{who} ✅ General equipado (id {general_id}).\nΔ Poder: {new_power:,}\nPróximo: validar composição em Operações".replace(",", ".")
+
+
+
+    def do_upgrade_general(self, user_id: str) -> str:
+        who = self._who(user_id)
+        d = self.get_or_create_domain(user_id)
+        rank_order = ["C", "B", "A", "S", "SS"]
+        rank_cost = {"C": 80_000, "B": 180_000, "A": 420_000, "S": 950_000}
+
+        with self.get_conn() as conn:
+            gid = d["general_id"]
+            if not gid:
+                return f"{who} ❌ General não encontrado no feudo."
+            grow = conn.execute("SELECT id, rank FROM generals WHERE id = ? AND user_id = ?", (gid, user_id)).fetchone()
+            if not grow:
+                return f"{who} ❌ General não encontrado no feudo."
+
+            current = str(grow["rank"] or "C")
+            if current not in rank_order:
+                current = "C"
+            if current == "SS":
+                return f"{who} ❌ General já alcançou o ápice (SS).\nPróximo: elevar tropas e forja para ampliar poder"
+
+            cost = rank_cost[current]
+            if d["gold"] < cost:
+                falta = cost - d["gold"]
+                return f"{who} ❌ Ouro insuficiente para evolução do General (falta {falta:,}).\nPróximo: clique em **Resgatar**".replace(",", ".")
+
+            new_rank = rank_order[rank_order.index(current)+1]
+            conn.execute("UPDATE generals SET rank = ? WHERE id = ?", (new_rank, gid))
+            conn.commit()
+
+            g_bonus, s_bonus = self.get_slot_bonuses(conn, gid, d["strategist_id"])
+
+        new_power = recalc_power(d["troops"], d["barracks_level"], d["forge_level"], d["doctrine"], g_bonus, s_bonus)
+        self.update_player_state(user_id, gold=d["gold"] - cost, power=new_power)
+        return (
+            f"{who} ✅ General evoluído: **{current} → {new_rank}**.\n"
+            f"Δ Ouro: -{cost:,} | Poder: {new_power:,}\n"
+            "Próximo: abra **Operações** para validar o novo patamar"
+        ).replace(",", ".")
 
     def do_recruit_strategist_auto(self, user_id: str) -> str:
         who = self._who(user_id)

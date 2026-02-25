@@ -609,6 +609,24 @@ def get_or_create_domain(user_id: str) -> sqlite3.Row:
             "INSERT OR IGNORE INTO army (user_id, last_train_ts, updated_at_ts) VALUES (?, ?, ?)",
             (user_id, ts, ts),
         )
+
+        # General canônico fixo: todo feudo nasce com um general padrão equipado.
+        general_count = conn.execute("SELECT COUNT(*) c FROM generals WHERE user_id = ?", (user_id,)).fetchone()["c"]
+        if general_count == 0:
+            conn.execute(
+                "INSERT INTO generals (user_id, name, rank, equipped, created_at_ts) VALUES (?, ?, 'C', 1, ?)",
+                (user_id, "General do Feudo", ts),
+            )
+        gid_row = conn.execute(
+            "SELECT id FROM generals WHERE user_id = ? ORDER BY equipped DESC, id ASC LIMIT 1", (user_id,)
+        ).fetchone()
+        if gid_row:
+            conn.execute(
+                "UPDATE generals SET equipped = CASE WHEN id = ? THEN 1 ELSE 0 END WHERE user_id = ?",
+                (gid_row["id"], user_id),
+            )
+            conn.execute("UPDATE army SET general_id = ? WHERE user_id = ?", (gid_row["id"], user_id))
+
         conn.commit()
 
         return conn.execute(
@@ -779,6 +797,10 @@ def do_recruit_general_auto(user_id: str) -> str:
     return gameplay.do_recruit_general_auto(user_id)
 
 
+def do_upgrade_general(user_id: str) -> str:
+    return gameplay.do_upgrade_general(user_id)
+
+
 def do_equip_general(user_id: str, general_id: int) -> str:
     return gameplay.do_equip_general(user_id, general_id)
 
@@ -894,6 +916,8 @@ def build_dominio_embed(user_id: str) -> discord.Embed:
     pending_maint = int(snap.total_maintenance_per_hour * (elapsed / 3600))
     pending_net = pending_gross - pending_maint
 
+    g_name, g_rank = get_general_info(user_id, d["general_id"])
+
     embed = discord.Embed(title="🏰 Domínio Imperial", color=discord.Color.dark_gold())
     embed.add_field(
         name="Recursos",
@@ -920,7 +944,7 @@ def build_dominio_embed(user_id: str) -> discord.Embed:
             f"👥 Tropas: **{d['troops']:,}**\n"
             f"⚔️ Poder: **{d['power']:,}**\n"
             f"🧭 Doutrina: **{d['doctrine']}**\n"
-            f"🎖️ General slot: **{d['general_id'] or 'vazio'}**\n"
+            f"🎖️ General: **{g_name}** (Rank {g_rank})\n"
             f"📐 Estrategista slot: **{d['strategist_id'] or 'vazio'}**"
         ).replace(",", "."),
         inline=False,
@@ -928,6 +952,17 @@ def build_dominio_embed(user_id: str) -> discord.Embed:
     embed.set_footer(text="Botões: Resgatar • Treinar • Construções • Militar • Operações • Rank")
     return embed
 
+
+
+
+def get_general_info(user_id: str, general_id: int | None) -> tuple[str, str]:
+    if not general_id:
+        return "—", "C"
+    with get_conn() as conn:
+        row = conn.execute("SELECT name, rank FROM generals WHERE id = ? AND user_id = ?", (general_id, user_id)).fetchone()
+        if not row:
+            return "General do Feudo", "C"
+        return str(row["name"] or "General do Feudo"), str(row["rank"] or "C")
 
 def build_construcoes_embed(user_id: str, notice: str | None = None) -> discord.Embed:
     d = get_or_create_domain(user_id)
@@ -961,10 +996,11 @@ def build_construcoes_embed(user_id: str, notice: str | None = None) -> discord.
 
 def build_militar_embed(user_id: str, notice: str | None = None) -> discord.Embed:
     d = get_or_create_domain(user_id)
+    g_name, g_rank = get_general_info(user_id, d["general_id"])
     embed = discord.Embed(title="🛡️ Painel Militar", color=discord.Color.dark_teal())
     embed.description = (
         f"Doutrina: **{d['doctrine']}**\n"
-        f"General slot: **{d['general_id'] or 'vazio'}**\n"
+        f"General: **{g_name}** (Rank {g_rank})\n"
         f"Estrategista slot: **{d['strategist_id'] or 'vazio'}**\n"
         f"Poder atual: **{d['power']:,}**"
     ).replace(",", ".")
@@ -974,8 +1010,8 @@ def build_militar_embed(user_id: str, notice: str | None = None) -> discord.Embe
         name="Fluxo",
         value=(
             "✅ Composição militar pronta\n"
-            "Δ Doutrina e slots alteram o poder\n"
-            "Próximo: ajuste doutrina/slots e volte ao Domínio"
+            "Δ Evoluir General aumenta bônus de poder\n"
+            "Próximo: evolua o General ou avance para Operações"
         ),
         inline=False,
     )
@@ -1074,19 +1110,14 @@ async def doutrina(ctx: commands.Context, estilo: str | None = None) -> None:
 
 
 @bot.command(name="recrutar_general", hidden=True)
-async def recrutar_general(ctx: commands.Context, *, nome: str | None = None) -> None:
-    if not nome:
-        await ctx.send("Uso: `!recrutar_general <nome>`")
-        return
+async def recrutar_general(ctx: commands.Context) -> None:
     await ctx.send(do_recruit_general_auto(str(ctx.author.id)))
 
 
 @bot.command(name="equipar_general", hidden=True)
 async def equipar_general(ctx: commands.Context, general_id: int | None = None) -> None:
-    if not general_id:
-        await ctx.send("Uso: `!equipar_general <id>`")
-        return
-    await ctx.send(do_equip_general(str(ctx.author.id), general_id))
+    del general_id
+    await ctx.send(f"<@{ctx.author.id}> ✅ General canônico já está equipado por padrão.")
 
 
 @bot.command(name="recrutar_estrategista", hidden=True)
@@ -1273,81 +1304,69 @@ async def economia_teste_error(ctx: commands.Context, error: commands.CommandErr
     await ctx.send("Erro interno no teste de economia.")
 
 
+GUIDE_PAGES: list[tuple[str, str]] = [
+    (
+        "📘 Guia do Feudo — Página 1/3",
+        "**Comece aqui (10 segundos)**\n"
+        "1) Use `!dominio` para abrir o painel central.\n"
+        "2) Clique em **Resgatar** para gerar ouro.\n"
+        "3) Clique em **Construções** para melhorar Celeiros/Casernas/Forja.\n\n"
+        "**Próximo passo claro:** fortalecer economia e voltar ao painel.",
+    ),
+    (
+        "📘 Guia do Feudo — Página 2/3",
+        "**Progressão visível (3 eixos)**\n"
+        "• **Riqueza**: ouro para upgrades e manutenção.\n"
+        "• **Poder**: tropas + doutrina + General canônico + estrategista.\n"
+        "• **Prestígio**: pontuação sazonal por operações.\n\n"
+        "**Próximo passo claro:** ajuste doutrina no painel Militar e simule Operações.",
+    ),
+    (
+        "📘 Guia do Feudo — Página 3/3",
+        "**Comandos públicos**\n"
+        "`!dominio` → jogar o núcleo inteiro por clique\n"
+        "`!rank` → comparar riqueza/poder/prestígio\n"
+        "`!guia` → onboarding por páginas\n\n"
+        "**Admin (oculto):** `!diagnostico`, `!painel_kpis`, `!economia_teste`, `!decreto_soberano`\n"
+        "**Dica:** se uma view expirar, use `🔄 Reabrir Painel`.",
+    ),
+]
+
+
+def build_guia_embed(page_index: int) -> discord.Embed:
+    idx = max(0, min(page_index, len(GUIDE_PAGES) - 1))
+    title, text = GUIDE_PAGES[idx]
+    embed = discord.Embed(title=title, description=text, color=discord.Color.dark_gold())
+    embed.set_footer(text="Navegação: ◀️ Anterior • ▶️ Próxima")
+    return embed
+
+
+class GuiaView(discord.ui.View):
+    def __init__(self, author_id: int, page_index: int = 0):
+        super().__init__(timeout=180)
+        self.author_id = author_id
+        self.page_index = max(0, min(page_index, len(GUIDE_PAGES) - 1))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Apenas quem abriu o guia pode navegar nesta mensagem.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="◀️", style=discord.ButtonStyle.secondary)
+    async def prev_page(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.page_index = (self.page_index - 1) % len(GUIDE_PAGES)
+        await interaction.response.edit_message(embed=build_guia_embed(self.page_index), view=self)
+
+    @discord.ui.button(label="▶️", style=discord.ButtonStyle.secondary)
+    async def next_page(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.page_index = (self.page_index + 1) % len(GUIDE_PAGES)
+        await interaction.response.edit_message(embed=build_guia_embed(self.page_index), view=self)
+
+
 @bot.command(name="guia")
 async def guia(ctx: commands.Context) -> None:
-    embed = discord.Embed(
-        title="📘 Guia do Feudo — EBR Núcleo C",
-        description=(
-            "Entrada recomendada: `!dominio` (painel central).\n"
-            "Você joga quase tudo por botões: **Resgatar → Construções/Militar → Operações → Rank**."
-        ),
-        color=discord.Color.dark_gold(),
-    )
-    embed.add_field(
-        name="Comece em 30 segundos",
-        value=(
-            "1) `!dominio` abre seu painel\n"
-            "2) clique em **Resgatar** para gerar ouro\n"
-            "3) clique em **Construções** e use `🛠️ Melhorar`\n"
-            "4) clique em **Militar** para definir doutrina/slots\n"
-            "5) clique em **Operações** para simular incursões"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Comandos públicos (uso normal)",
-        value=(
-            "`!dominio` → painel principal do feudo\n"
-            "`!rank` → ranking de riqueza e poder\n"
-            "`!guia` → este guia"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Comandos avançados (atalhos textuais)",
-        value=(
-            "`!coletar` • `!treinar` • `!melhorar <celeiros|casernas|forja>`\n"
-            "`!doutrina <cerco|choque|furtivo|arcano>`\n"
-            "`!recrutar_general <nome>` • `!equipar_general <id>`\n"
-            "`!recrutar_estrategista <nome>` • `!equipar_estrategista <id>`\n"
-            "`!simular_operacao <tumba_sultao|ruinas_muralha|poco_nomes|estrada_cinzas|fortim_sol_negro>`\n"
-            "`!forjar` • `!cronicas`"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Como evoluir rápido",
-        value=(
-            "• Sem ouro, seu progresso trava (priorize **Resgatar** + **Celeiros**)\n"
-            "• Sem tropa, não há incursão (fortaleça **Casernas**)\n"
-            "• Sem forja, menos chance de achados raros (suba **Forja**)\n"
-            "• Operações exigem composição real (General/Estrategista em gates)"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Operações (raids narrativas)",
-        value=(
-            "Cada operação tem **requisito + risco + recompensa**.\n"
-            "Ex.: `tumba_sultao` pede Casernas T3+, General e Estrategista para rota completa."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Governança imperial",
-        value=(
-            "O soberano pode aplicar decretos temporários com impacto moderado.\n"
-            "Use `!temporada` para ver efeitos globais e duração."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Comandos admin",
-        value="`!diagnostico` • `!painel_kpis` • `!economia_teste` • `!decreto_soberano`",
-        inline=False,
-    )
-    embed.set_footer(text="Dica: se uma subview expirar, use o botão 🔄 Reabrir Painel")
-    await ctx.send(embed=embed)
+    await ctx.send(embed=build_guia_embed(0), view=GuiaView(author_id=ctx.author.id, page_index=0))
 
 
 @bot.command(name="diagnostico", hidden=True)
