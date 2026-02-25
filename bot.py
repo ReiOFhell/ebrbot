@@ -1134,11 +1134,6 @@ async def doutrina(ctx: commands.Context, estilo: str | None = None) -> None:
     await ctx.send(do_set_doctrine(str(ctx.author.id), estilo))
 
 
-@bot.command(name="recrutar_general", hidden=True)
-async def recrutar_general(ctx: commands.Context) -> None:
-    await ctx.send(do_recruit_general_auto(str(ctx.author.id)))
-
-
 @bot.command(name="equipar_general", hidden=True)
 async def equipar_general(ctx: commands.Context, general_id: int | None = None) -> None:
     del general_id
@@ -1148,14 +1143,6 @@ async def equipar_general(ctx: commands.Context, general_id: int | None = None) 
 @bot.command(name="evoluir_general", hidden=True)
 async def evoluir_general(ctx: commands.Context) -> None:
     await ctx.send(do_upgrade_general(str(ctx.author.id)))
-
-
-@bot.command(name="recrutar_estrategista", hidden=True)
-async def recrutar_estrategista(ctx: commands.Context, *, nome: str | None = None) -> None:
-    if not nome:
-        await ctx.send("Uso: `!recrutar_estrategista <nome>`")
-        return
-    await ctx.send(do_recruit_strategist_auto(str(ctx.author.id)))
 
 
 @bot.command(name="equipar_estrategista", hidden=True)
@@ -1373,6 +1360,51 @@ async def addouro_error(ctx: commands.Context, error: commands.CommandError) -> 
     await ctx.send("Erro interno ao adicionar ouro.")
 
 
+def delete_domain_data(user_id: str) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM season_scores WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM operation_runs WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM inventories WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM discoveries_log WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM panel_events WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM command_errors WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM strategists WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM generals WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM army WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM resources WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM domain_buildings WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM domains WHERE user_id = ?", (user_id,))
+        conn.commit()
+
+
+@bot.command(name="excluirdominio", hidden=True)
+@commands.has_permissions(administrator=True)
+async def excluirdominio(ctx: commands.Context, membro: discord.Member | None = None) -> None:
+    if membro is None:
+        await ctx.send("Uso: `!excluirdominio @membro`")
+        return
+
+    alvo_id = str(membro.id)
+    with get_conn() as conn:
+        existe = conn.execute("SELECT 1 FROM domains WHERE user_id = ?", (alvo_id,)).fetchone() is not None
+
+    if not existe:
+        await ctx.send(f"<@{ctx.author.id}> ❌ O membro <@{membro.id}> não possui domínio ativo.")
+        return
+
+    delete_domain_data(alvo_id)
+    await ctx.send(f"<@{ctx.author.id}> ✅ Domínio de <@{membro.id}> foi removido com sucesso.")
+
+
+@excluirdominio.error
+async def excluirdominio_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Apenas administradores podem usar `!excluirdominio`.")
+        return
+    logger.exception("Erro em !excluirdominio", exc_info=error)
+    await ctx.send("Erro interno ao excluir domínio.")
+
+
 def build_admin_embed() -> discord.Embed:
     embed = discord.Embed(
         title=f"🛠️ Painel de Administração — {APP_NAME}",
@@ -1424,8 +1456,8 @@ def build_admin_embed() -> discord.Embed:
         name="Comandos avançados/ocultos (debug e atalho)",
         value=(
             "`!coletar` • `!treinar` • `!melhorar <estrutura>` • `!doutrina <estilo>`\n"
-            "`!recrutar_general` • `!equipar_general` • `!evoluir_general`\n"
-            "`!recrutar_estrategista <nome>` • `!equipar_estrategista <id>` • `!evoluir_estrategista`\n"
+            "`!equipar_general` • `!evoluir_general`\n"
+            "`!equipar_estrategista <id>` • `!evoluir_estrategista`\n"
             "`!operacao <chave>` (alias: `!simular_operacao`) • `!forjar` • `!cronicas`"
         ),
         inline=False,
@@ -1482,7 +1514,7 @@ GUIDE_PAGES: list[tuple[str, str]] = [
         "`!rank` → comparar riqueza/poder/prestígio\n"
         "`!guia` → onboarding por páginas\n\n"
         f"**{APP_NAME}:** {APP_SLOGAN}\n"
-        "**Admin (oculto):** `!admin`, `!addouro`, `!diagnostico`, `!painel_kpis`, `!economia_teste`, `!decreto_soberano`\n"
+        "**Admin (oculto):** `!admin`, `!addouro`, `!excluirdominio`, `!diagnostico`, `!painel_kpis`, `!economia_teste`, `!decreto_soberano`\n"
         "**Dica:** se uma view expirar, use `🔄 Reabrir Painel`.",
     ),
 ]

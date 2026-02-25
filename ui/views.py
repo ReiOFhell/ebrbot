@@ -232,14 +232,6 @@ class MilitarView(discord.ui.View):
             view=MilitarView(author_id=interaction.user.id, deps=self.deps),
         )
 
-    @discord.ui.button(label="📐 Recrutar Estrategista", style=discord.ButtonStyle.secondary)
-    async def btn_recrutar_strategista(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        msg = self.deps.service.do_recruit_strategist_auto(str(interaction.user.id))
-        await interaction.response.edit_message(
-            embed=self.deps.build_militar_embed(str(interaction.user.id), msg),
-            view=MilitarView(author_id=interaction.user.id, deps=self.deps),
-        )
-
     @discord.ui.button(label="⬅️ Voltar", style=discord.ButtonStyle.primary)
     async def btn_back(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.edit_message(
