@@ -281,7 +281,7 @@ class OperationSelect(discord.ui.Select):
             options.append(discord.SelectOption(label=op["title"], value=op["key"], description=desc[:100]))
         if not options:
             options = [discord.SelectOption(label="Sem operações", value="none")]
-        super().__init__(placeholder="Selecionar operação para simular", min_values=1, max_values=1, options=options)
+        super().__init__(placeholder="Selecionar operação para executar", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         user_id = str(interaction.user.id)
@@ -292,7 +292,7 @@ class OperationSelect(discord.ui.Select):
                 await interaction.response.send_message("❌ Nenhuma operação cadastrada.", ephemeral=True)
                 return
 
-            msg = self.deps.service.do_simular_operacao(user_id, value)
+            msg = self.deps.service.do_operacao(user_id, value)
             self.deps.log_panel_event(
                 user_id=user_id,
                 guild_id=guild_id,

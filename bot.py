@@ -206,8 +206,13 @@ def init_db() -> None:
                 user_id TEXT NOT NULL,
                 operation_id INTEGER NOT NULL,
                 outcome TEXT NOT NULL,
+                route_mode TEXT NOT NULL DEFAULT 'full',
+                success_chance REAL NOT NULL DEFAULT 0,
                 troops_lost INTEGER NOT NULL DEFAULT 0,
                 gold_delta INTEGER NOT NULL DEFAULT 0,
+                prestige_gain INTEGER NOT NULL DEFAULT 0,
+                power_before INTEGER NOT NULL DEFAULT 0,
+                power_after INTEGER NOT NULL DEFAULT 0,
                 created_at_ts INTEGER NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES domains(user_id),
                 FOREIGN KEY(operation_id) REFERENCES operations(id)
@@ -342,6 +347,11 @@ def init_db() -> None:
         ensure_column(conn, "operations", "min_troops", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "operations", "requires_arcane_general", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "operations", "required_legion_set_pieces", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "operation_runs", "route_mode", "TEXT NOT NULL DEFAULT 'full'")
+        ensure_column(conn, "operation_runs", "success_chance", "REAL NOT NULL DEFAULT 0")
+        ensure_column(conn, "operation_runs", "prestige_gain", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "operation_runs", "power_before", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "operation_runs", "power_after", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "season_scores", "updated_at_ts", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "season_state", "decree_name", "TEXT")
         ensure_column(conn, "season_state", "decree_description", "TEXT")
@@ -674,7 +684,7 @@ def has_strategist_gate(domain: sqlite3.Row, conn: sqlite3.Connection) -> tuple[
         return False, "Requisito: 200.000 ouro para manter conselho estratégico."
     runs = conn.execute("SELECT COUNT(*) c FROM operation_runs WHERE user_id = ?", (domain["user_id"],)).fetchone()["c"]
     if runs < 1:
-        return False, "Requisito: concluir ao menos 1 operação (ex.: `!simular_operacao estrada_cinzas`) para desbloquear estrategista."
+        return False, "Requisito: concluir ao menos 1 operação (ex.: `!operacao estrada_cinzas`) para desbloquear estrategista."
     return True, "OK"
 
 
@@ -815,6 +825,10 @@ def do_equip_strategist(user_id: str, strategist_id: int) -> str:
 
 def do_upgrade_strategist(user_id: str) -> str:
     return gameplay.do_upgrade_strategist(user_id)
+
+
+def do_operacao(user_id: str, key: str) -> str:
+    return gameplay.do_operacao(user_id, key)
 
 
 def do_simular_operacao(user_id: str, key: str) -> str:
@@ -1040,7 +1054,7 @@ def build_operacoes_embed(user_id: str, notice: str | None = None) -> discord.Em
         name="Fluxo",
         value=(
             "✅ Operações verificadas por requisito\n"
-            "Δ Simulação grava histórico em operation_runs\n"
+            "Δ Operações reais gravam histórico e impacto em operation_runs\n"
             "Próximo: escolha uma operação no seletor"
         ),
         inline=False,
@@ -1150,12 +1164,20 @@ async def evoluir_estrategista(ctx: commands.Context) -> None:
     await ctx.send(do_upgrade_strategist(str(ctx.author.id)))
 
 
+@bot.command(name="operacao", hidden=True)
+async def operacao(ctx: commands.Context, key: str | None = None) -> None:
+    if not key:
+        await ctx.send("Uso: `!operacao <tumba_sultao|ruinas_muralha|poco_nomes|estrada_cinzas|fortim_sol_negro>`")
+        return
+    await ctx.send(do_operacao(str(ctx.author.id), key))
+
+
 @bot.command(name="simular_operacao", hidden=True)
 async def simular_operacao(ctx: commands.Context, key: str | None = None) -> None:
     if not key:
-        await ctx.send("Uso: `!simular_operacao <tumba_sultao|ruinas_muralha|poco_nomes|estrada_cinzas|fortim_sol_negro>`")
+        await ctx.send("Uso legado: `!simular_operacao <chave>` (preferencial: `!operacao <chave>`)")
         return
-    await ctx.send(do_simular_operacao(str(ctx.author.id), key))
+    await ctx.send(do_operacao(str(ctx.author.id), key))
 
 
 
@@ -1177,7 +1199,7 @@ async def forjar(ctx: commands.Context) -> None:
             f"🔨 Forja concluída (T{tier}).\n"
             f"Δ Ouro: -{cost:,}\n"
             f"Resultado: {achado}\n"
-            "Próximo: `!simular_operacao` para buscar achados em campo."
+            "Próximo: `!operacao` para buscar achados em campo."
         ).replace(",", ".")
     )
 
@@ -1397,7 +1419,7 @@ def build_admin_embed() -> discord.Embed:
             "`!coletar` • `!treinar` • `!melhorar <estrutura>` • `!doutrina <estilo>`\n"
             "`!recrutar_general` • `!equipar_general` • `!evoluir_general`\n"
             "`!recrutar_estrategista <nome>` • `!equipar_estrategista <id>` • `!evoluir_estrategista`\n"
-            "`!simular_operacao <chave>` • `!forjar` • `!cronicas`"
+            "`!operacao <chave>` (alias: `!simular_operacao`) • `!forjar` • `!cronicas`"
         ),
         inline=False,
     )

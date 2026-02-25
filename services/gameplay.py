@@ -386,7 +386,7 @@ class GameplayService:
             return "⚠️ sem estrategista: apenas rota parcial"
         return "✅ disponível"
 
-    def do_simular_operacao(self, user_id: str, key: str) -> str:
+    def do_operacao(self, user_id: str, key: str) -> str:
         who = self._who(user_id)
         d = self.get_or_create_domain(user_id)
         with self.get_conn() as conn:
@@ -403,6 +403,8 @@ class GameplayService:
             chance = simulate_operation_success_chance(d["power"], opf["difficulty_power"], d["doctrine"], opf["preferred_doctrine"])
             if partial_route:
                 chance *= 0.55
+
+            g_bonus, s_bonus = self.get_slot_bonuses(conn, d["general_id"], d["strategist_id"])
 
         outcome = "vitória tática" if random.random() <= chance else "falha tática"
         modifiers = self.get_global_modifiers()
@@ -421,31 +423,55 @@ class GameplayService:
             route_line = "Rota parcial: sem estrategista, retorno incompleto."
 
         troops_lost = int(max(1, d["troops"] * opf["base_risk_percent"] * (0.4 if outcome == "vitória tática" else 0.8) * risk_mult * risk_mult_global))
+        troops_lost = min(int(d["troops"]), troops_lost)
+        troops_after = max(0, int(d["troops"]) - troops_lost)
+
         base_gold_delta = int(opf["base_gold_reward"] * (1.0 if outcome == "vitória tática" else 0.2) * reward_mult * reward_mult_global)
         prestige_gain = int(opf["prestige_reward"] * (1.0 if outcome == "vitória tática" else 0.4) * prestige_mult * prestige_mult_global)
         forge_mult = 1.0 + (d["forge_level"] - 1) * 0.03
         gold_delta = int(base_gold_delta * forge_mult)
+        gold_after = max(0, int(d["gold"]) + gold_delta)
 
+        new_power = recalc_power(troops_after, d["barracks_level"], d["forge_level"], d["doctrine"], g_bonus, s_bonus)
+        ts = self.now_ts()
         with self.get_conn() as conn:
             conn.execute(
                 """
                 INSERT INTO season_scores (season_number, user_id, prestige, wealth_snapshot, power_snapshot, updated_at_ts)
-                VALUES (1, ?, ?, 0, 0, ?)
+                VALUES (1, ?, ?, ?, ?, ?)
                 ON CONFLICT(season_number, user_id) DO UPDATE SET
                     prestige = prestige + excluded.prestige,
+                    wealth_snapshot = excluded.wealth_snapshot,
+                    power_snapshot = excluded.power_snapshot,
                     updated_at_ts = excluded.updated_at_ts
                 """,
-                (user_id, prestige_gain, self.now_ts()),
+                (user_id, prestige_gain, gold_after, new_power, ts),
             )
             conn.execute(
                 """
-                INSERT INTO operation_runs (user_id, operation_id, outcome, troops_lost, gold_delta, created_at_ts)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO operation_runs (
+                    user_id, operation_id, outcome, route_mode, success_chance,
+                    troops_lost, gold_delta, prestige_gain, power_before, power_after, created_at_ts
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (user_id, op["id"], outcome, troops_lost, gold_delta, self.now_ts()),
+                (
+                    user_id,
+                    op["id"],
+                    outcome,
+                    "partial" if partial_route else "full",
+                    round(chance, 6),
+                    troops_lost,
+                    gold_delta,
+                    prestige_gain,
+                    int(d["power"]),
+                    int(new_power),
+                    ts,
+                ),
             )
             conn.commit()
 
+        self.update_player_state(user_id, troops=troops_after, gold=gold_after, power=new_power)
         relic_line = self.resolve_discovery(user_id, f"operacao:{op['key']}", d["forge_level"])
 
         decree_line = ""
@@ -455,12 +481,16 @@ class GameplayService:
             )
 
         return (
-            f"{who} 🧪 Simulação `{op['title']}`\n"
+            f"{who} ⚔️ Operação `{op['title']}`\n"
             f"{route_line}\n"
-            f"Poder atual: {d['power']:,} | Dificuldade: {opf['difficulty_power']:,}\n"
-            f"Chance estimada: {chance*100:.1f}%\n"
-            f"Resultado simulado: **{outcome}**\n"
-            f"Registro: perdas estimadas {troops_lost:,} tropas | recompensa base {gold_delta:,} ouro | prestígio +{prestige_gain:,}\n"
+            f"Poder aplicado: {d['power']:,} → {new_power:,} | Dificuldade: {opf['difficulty_power']:,}\n"
+            f"Resultado: **{outcome}**\n"
+            f"Impacto real: -{troops_lost:,} tropas | +{gold_delta:,} ouro | prestígio +{prestige_gain:,}\n"
+            f"Saldo pós-operação: tropas {troops_after:,} | ouro {gold_after:,}\n"
             f"{relic_line}\n"
-            f"Próximo: tente outra operação ou ajuste composição militar{decree_line}"
+            f"Próximo: reforce tropas/composição e execute nova operação{decree_line}"
         ).replace(",", ".")
+
+    # Compatibilidade com aliases e integrações antigas.
+    def do_simular_operacao(self, user_id: str, key: str) -> str:
+        return self.do_operacao(user_id, key)
