@@ -192,6 +192,17 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS unit_name_parts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role TEXT NOT NULL,
+                part_type TEXT NOT NULL,
+                value TEXT NOT NULL,
+                UNIQUE(role, part_type, value)
+            )
+            """
+        )
         # 5) operações
         conn.execute(
             """
@@ -372,6 +383,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_operation_runs_user ON operation_runs(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_generals_user ON generals(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_strategists_user ON strategists(user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_unit_name_parts_role ON unit_name_parts(role, part_type)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_panel_events_user ON panel_events(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_panel_events_name ON panel_events(event_name)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_command_errors_ts ON command_errors(created_at_ts)")
@@ -423,6 +435,42 @@ def init_db() -> None:
             ('selo_sal_nahr', 'Selo de Sal de Nahr', 'SS', 'Onde o sal cai, a memória acorda.'),
             ('fragmento_pacto_primordial', 'Fragmento do Pacto Primordial', '99999', 'O primeiro pacto não foi assinado por mãos humanas.')
             """
+        )
+
+        conn.executemany(
+            "INSERT OR IGNORE INTO unit_name_parts (role, part_type, value) VALUES (?, ?, ?)",
+            [
+                ("general", "prefix", "Aço"),
+                ("general", "prefix", "Ferro"),
+                ("general", "prefix", "Ígneo"),
+                ("general", "prefix", "Grifo"),
+                ("general", "prefix", "Rubro"),
+                ("general", "core", "Vanguarda"),
+                ("general", "core", "Martelo"),
+                ("general", "core", "Estandarte"),
+                ("general", "core", "Bastião"),
+                ("general", "core", "Centurião"),
+                ("general", "title", "da Aurora"),
+                ("general", "title", "do Cerco"),
+                ("general", "title", "de Kharon"),
+                ("general", "title", "do Juramento"),
+                ("general", "title", "da Legião"),
+                ("strategist", "prefix", "Silente"),
+                ("strategist", "prefix", "Velado"),
+                ("strategist", "prefix", "Lúcido"),
+                ("strategist", "prefix", "Nebuloso"),
+                ("strategist", "prefix", "Prístino"),
+                ("strategist", "core", "Arquivista"),
+                ("strategist", "core", "Cartógrafo"),
+                ("strategist", "core", "Oráculo"),
+                ("strategist", "core", "Cronista"),
+                ("strategist", "core", "Teórico"),
+                ("strategist", "title", "do Conselho"),
+                ("strategist", "title", "das Cinzas"),
+                ("strategist", "title", "da Vigília"),
+                ("strategist", "title", "de Nahr"),
+                ("strategist", "title", "do Eclipse"),
+            ],
         )
 
         # Canonização dos 10 micro-lores (compatível com bases já existentes)
@@ -605,6 +653,25 @@ def resolve_discovery(user_id: str, source: str, forge_level: int) -> str:
     )
 
 
+def compose_unit_name(conn: sqlite3.Connection, role: str) -> str:
+    prefix = conn.execute(
+        "SELECT value FROM unit_name_parts WHERE role = ? AND part_type = 'prefix' ORDER BY RANDOM() LIMIT 1",
+        (role,),
+    ).fetchone()
+    core = conn.execute(
+        "SELECT value FROM unit_name_parts WHERE role = ? AND part_type = 'core' ORDER BY RANDOM() LIMIT 1",
+        (role,),
+    ).fetchone()
+    title = conn.execute(
+        "SELECT value FROM unit_name_parts WHERE role = ? AND part_type = 'title' ORDER BY RANDOM() LIMIT 1",
+        (role,),
+    ).fetchone()
+
+    if not prefix or not core or not title:
+        return "General do Feudo" if role == "general" else "Estrategista do Feudo"
+    return f"{prefix['value']} {core['value']} {title['value']}"
+
+
 def get_or_create_domain(user_id: str) -> sqlite3.Row:
     ts = now_ts()
     with get_conn() as conn:
@@ -627,15 +694,27 @@ def get_or_create_domain(user_id: str) -> sqlite3.Row:
             (user_id, ts, ts),
         )
 
-        # General canônico fixo: todo feudo nasce com um general padrão equipado.
+        # Slots canônicos: todo feudo nasce com 1 General e 1 Estrategista equipados.
         general_count = conn.execute("SELECT COUNT(*) c FROM generals WHERE user_id = ?", (user_id,)).fetchone()["c"]
         if general_count == 0:
+            general_name = compose_unit_name(conn, "general")
             conn.execute(
                 "INSERT INTO generals (user_id, name, rank, equipped, created_at_ts) VALUES (?, ?, 'C', 1, ?)",
-                (user_id, "General do Feudo", ts),
+                (user_id, general_name, ts),
             )
+        strategist_count = conn.execute("SELECT COUNT(*) c FROM strategists WHERE user_id = ?", (user_id,)).fetchone()["c"]
+        if strategist_count == 0:
+            strategist_name = compose_unit_name(conn, "strategist")
+            conn.execute(
+                "INSERT INTO strategists (user_id, name, rank, equipped, created_at_ts) VALUES (?, ?, 'C', 1, ?)",
+                (user_id, strategist_name, ts),
+            )
+
         gid_row = conn.execute(
             "SELECT id FROM generals WHERE user_id = ? ORDER BY equipped DESC, id ASC LIMIT 1", (user_id,)
+        ).fetchone()
+        sid_row = conn.execute(
+            "SELECT id FROM strategists WHERE user_id = ? ORDER BY equipped DESC, id ASC LIMIT 1", (user_id,)
         ).fetchone()
         if gid_row:
             conn.execute(
@@ -643,6 +722,12 @@ def get_or_create_domain(user_id: str) -> sqlite3.Row:
                 (gid_row["id"], user_id),
             )
             conn.execute("UPDATE army SET general_id = ? WHERE user_id = ?", (gid_row["id"], user_id))
+        if sid_row:
+            conn.execute(
+                "UPDATE strategists SET equipped = CASE WHEN id = ? THEN 1 ELSE 0 END WHERE user_id = ?",
+                (sid_row["id"], user_id),
+            )
+            conn.execute("UPDATE army SET strategist_id = ? WHERE user_id = ?", (sid_row["id"], user_id))
 
         conn.commit()
 
@@ -818,18 +903,6 @@ def do_upgrade_general(user_id: str) -> str:
     return gameplay.do_upgrade_general(user_id)
 
 
-def do_equip_general(user_id: str, general_id: int) -> str:
-    return gameplay.do_equip_general(user_id, general_id)
-
-
-def do_recruit_strategist_auto(user_id: str) -> str:
-    return gameplay.do_recruit_strategist_auto(user_id)
-
-
-def do_equip_strategist(user_id: str, strategist_id: int) -> str:
-    return gameplay.do_equip_strategist(user_id, strategist_id)
-
-
 def do_upgrade_strategist(user_id: str) -> str:
     return gameplay.do_upgrade_strategist(user_id)
 
@@ -942,6 +1015,7 @@ def build_dominio_embed(user_id: str) -> discord.Embed:
     pending_net = pending_gross - pending_maint
 
     g_name, g_rank = get_general_info(user_id, d["general_id"])
+    s_name, s_rank = get_strategist_info(user_id, d["strategist_id"])
 
     embed = discord.Embed(title="🏰 Domínio Imperial", color=discord.Color.dark_gold())
     embed.add_field(
@@ -970,7 +1044,7 @@ def build_dominio_embed(user_id: str) -> discord.Embed:
             f"⚔️ Poder: **{d['power']:,}**\n"
             f"🧭 Doutrina: **{d['doctrine']}**\n"
             f"🎖️ General: **{g_name}** (Rank {g_rank})\n"
-            f"📐 Estrategista slot: **{d['strategist_id'] or 'vazio'}**"
+            f"📐 Estrategista: **{s_name}** (Rank {s_rank})"
         ).replace(",", "."),
         inline=False,
     )
@@ -988,6 +1062,19 @@ def get_general_info(user_id: str, general_id: int | None) -> tuple[str, str]:
         if not row:
             return "General do Feudo", "C"
         return str(row["name"] or "General do Feudo"), str(row["rank"] or "C")
+
+
+def get_strategist_info(user_id: str, strategist_id: int | None) -> tuple[str, str]:
+    if not strategist_id:
+        return "—", "C"
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT name, rank FROM strategists WHERE id = ? AND user_id = ?",
+            (strategist_id, user_id),
+        ).fetchone()
+        if not row:
+            return "Estrategista do Feudo", "C"
+        return str(row["name"] or "Estrategista do Feudo"), str(row["rank"] or "C")
 
 def build_construcoes_embed(user_id: str, notice: str | None = None) -> discord.Embed:
     d = get_or_create_domain(user_id)
@@ -1022,11 +1109,12 @@ def build_construcoes_embed(user_id: str, notice: str | None = None) -> discord.
 def build_militar_embed(user_id: str, notice: str | None = None) -> discord.Embed:
     d = get_or_create_domain(user_id)
     g_name, g_rank = get_general_info(user_id, d["general_id"])
+    s_name, s_rank = get_strategist_info(user_id, d["strategist_id"])
     embed = discord.Embed(title="🛡️ Painel Militar", color=discord.Color.dark_teal())
     embed.description = (
         f"Doutrina: **{d['doctrine']}**\n"
         f"General: **{g_name}** (Rank {g_rank})\n"
-        f"Estrategista slot: **{d['strategist_id'] or 'vazio'}**\n"
+        f"Estrategista: **{s_name}** (Rank {s_rank})\n"
         f"Poder atual: **{d['power']:,}**"
     ).replace(",", ".")
     if notice:
@@ -1040,7 +1128,7 @@ def build_militar_embed(user_id: str, notice: str | None = None) -> discord.Embe
         ),
         inline=False,
     )
-    embed.set_footer(text="Use os botões para gerir doutrina e slots")
+    embed.set_footer(text="Use os botões para gerir doutrina e evolução")
     return embed
 
 
@@ -1134,23 +1222,9 @@ async def doutrina(ctx: commands.Context, estilo: str | None = None) -> None:
     await ctx.send(do_set_doctrine(str(ctx.author.id), estilo))
 
 
-@bot.command(name="equipar_general", hidden=True)
-async def equipar_general(ctx: commands.Context, general_id: int | None = None) -> None:
-    del general_id
-    await ctx.send(f"<@{ctx.author.id}> ✅ General canônico já está equipado por padrão.")
-
-
 @bot.command(name="evoluir_general", hidden=True)
 async def evoluir_general(ctx: commands.Context) -> None:
     await ctx.send(do_upgrade_general(str(ctx.author.id)))
-
-
-@bot.command(name="equipar_estrategista", hidden=True)
-async def equipar_estrategista(ctx: commands.Context, strategist_id: int | None = None) -> None:
-    if not strategist_id:
-        await ctx.send("Uso: `!equipar_estrategista <id>`")
-        return
-    await ctx.send(do_equip_strategist(str(ctx.author.id), strategist_id))
 
 
 @bot.command(name="evoluir_estrategista", hidden=True)
@@ -1456,8 +1530,7 @@ def build_admin_embed() -> discord.Embed:
         name="Comandos avançados/ocultos (debug e atalho)",
         value=(
             "`!coletar` • `!treinar` • `!melhorar <estrutura>` • `!doutrina <estilo>`\n"
-            "`!equipar_general` • `!evoluir_general`\n"
-            "`!equipar_estrategista <id>` • `!evoluir_estrategista`\n"
+            "`!evoluir_general` • `!evoluir_estrategista`\n"
             "`!operacao <chave>` (alias: `!simular_operacao`) • `!forjar` • `!cronicas`"
         ),
         inline=False,
@@ -1503,7 +1576,7 @@ GUIDE_PAGES: list[tuple[str, str]] = [
         f"📘 Guia do {APP_NAME} — Página 2/3",
         "**Progressão visível (3 eixos)**\n"
         "• **Riqueza**: ouro para upgrades e manutenção.\n"
-        "• **Poder**: tropas + doutrina + General canônico + estrategista.\n"
+        "• **Poder**: tropas + doutrina + General e Estrategista nativos do domínio.\n"
         "• **Prestígio**: pontuação sazonal por operações.\n\n"
         "**Próximo passo claro:** ajuste doutrina no painel Militar e simule Operações.",
     ),

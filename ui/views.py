@@ -149,66 +149,12 @@ class DoctrineSelect(discord.ui.Select):
         )
 
 
-class GeneralEquipSelect(discord.ui.Select):
-    def __init__(self, user_id: str, deps: PanelDeps) -> None:
-        self.deps = deps
-        with self.deps.get_conn() as conn:
-            generals = conn.execute("SELECT id, name FROM generals WHERE user_id = ? ORDER BY id DESC LIMIT 25", (user_id,)).fetchall()
-        options = [discord.SelectOption(label=f"{g['name']} (id {g['id']})", value=str(g["id"])) for g in generals]
-        if not options:
-            options = [discord.SelectOption(label="Sem generais recrutados", value="none", default=True)]
-        super().__init__(placeholder="Equipar general", min_values=1, max_values=1, options=options, disabled=(options[0].value == "none"))
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        value = self.values[0]
-        if value == "none":
-            await interaction.response.send_message("❌ Nenhum general disponível.", ephemeral=True)
-            return
-        msg = self.deps.service.do_equip_general(str(interaction.user.id), int(value))
-        await interaction.response.edit_message(
-            embed=self.deps.build_militar_embed(str(interaction.user.id), msg),
-            view=MilitarView(author_id=interaction.user.id, deps=self.deps),
-        )
-
-
-class StrategistEquipSelect(discord.ui.Select):
-    def __init__(self, user_id: str, deps: PanelDeps) -> None:
-        self.deps = deps
-        with self.deps.get_conn() as conn:
-            strategists = conn.execute(
-                "SELECT id, name FROM strategists WHERE user_id = ? ORDER BY id DESC LIMIT 25", (user_id,)
-            ).fetchall()
-        options = [discord.SelectOption(label=f"{s['name']} (id {s['id']})", value=str(s["id"])) for s in strategists]
-        if not options:
-            options = [discord.SelectOption(label="Sem estrategistas recrutados", value="none", default=True)]
-        super().__init__(
-            placeholder="Equipar estrategista",
-            min_values=1,
-            max_values=1,
-            options=options,
-            disabled=(options[0].value == "none"),
-        )
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        value = self.values[0]
-        if value == "none":
-            await interaction.response.send_message("❌ Nenhum estrategista disponível.", ephemeral=True)
-            return
-        msg = self.deps.service.do_equip_strategist(str(interaction.user.id), int(value))
-        await interaction.response.edit_message(
-            embed=self.deps.build_militar_embed(str(interaction.user.id), msg),
-            view=MilitarView(author_id=interaction.user.id, deps=self.deps),
-        )
-
-
 class MilitarView(discord.ui.View):
     def __init__(self, author_id: int, deps: PanelDeps):
         super().__init__(timeout=180)
         self.author_id = author_id
         self.deps = deps
-        user_id = str(author_id)
         self.add_item(DoctrineSelect(deps))
-        self.add_item(StrategistEquipSelect(user_id, deps))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:

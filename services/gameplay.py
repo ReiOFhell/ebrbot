@@ -148,23 +148,6 @@ class GameplayService:
             "Próximo: fortaleça Casernas/Forja e avance em Operações"
         )
 
-    def do_equip_general(self, user_id: str, general_id: int) -> str:
-        who = self._who(user_id)
-        d = self.get_or_create_domain(user_id)
-        with self.get_conn() as conn:
-            g = conn.execute("SELECT id FROM generals WHERE id = ? AND user_id = ?", (general_id, user_id)).fetchone()
-            if not g:
-                return f"{who} ❌ General não encontrado para este jogador."
-            conn.execute("UPDATE generals SET equipped = 0 WHERE user_id = ?", (user_id,))
-            conn.execute("UPDATE generals SET equipped = 1 WHERE id = ?", (general_id,))
-            conn.commit()
-            g_bonus, s_bonus = self.get_slot_bonuses(conn, general_id, d["strategist_id"])
-        new_power = recalc_power(d["troops"], d["barracks_level"], d["forge_level"], d["doctrine"], g_bonus, s_bonus)
-        self.update_player_state(user_id, general_id=general_id, power=new_power)
-        return f"{who} ✅ General equipado (id {general_id}).\nΔ Poder: {new_power:,}\nPróximo: validar composição em Operações".replace(",", ".")
-
-
-
     def do_upgrade_general(self, user_id: str) -> str:
         who = self._who(user_id)
         d = self.get_or_create_domain(user_id)
@@ -204,43 +187,6 @@ class GameplayService:
             "Próximo: abra **Operações** para validar o novo patamar"
         ).replace(",", ".")
 
-    def do_recruit_strategist_auto(self, user_id: str) -> str:
-        who = self._who(user_id)
-        d = self.get_or_create_domain(user_id)
-        with self.get_conn() as conn:
-            ok, msg = self.has_strategist_gate(d, conn)
-            if not ok:
-                return f"{who} ❌ {msg}"
-            count = conn.execute("SELECT COUNT(*) c FROM strategists WHERE user_id = ?", (user_id,)).fetchone()["c"]
-            name = f"Estrategista #{count + 1}"
-            conn.execute(
-                "INSERT INTO strategists (user_id, name, rank, equipped, created_at_ts) VALUES (?, ?, 'C', 0, ?)",
-                (user_id, name, self.now_ts()),
-            )
-            sid = conn.execute("SELECT last_insert_rowid() id").fetchone()["id"]
-            conn.commit()
-        return f"{who} ✅ Estrategista recrutado: **{name}** (id {sid}).\nΔ Slot de especialista disponível\nPróximo: selecione o estrategista no painel".replace(",", ".")
-
-    def do_equip_strategist(self, user_id: str, strategist_id: int) -> str:
-        who = self._who(user_id)
-        d = self.get_or_create_domain(user_id)
-        with self.get_conn() as conn:
-            ok, msg = self.has_strategist_gate(d, conn)
-            if not ok:
-                return f"{who} ❌ {msg}"
-            srow = conn.execute("SELECT id FROM strategists WHERE id = ? AND user_id = ?", (strategist_id, user_id)).fetchone()
-            if not srow:
-                return f"{who} ❌ Estrategista não encontrado para este jogador."
-            conn.execute("UPDATE strategists SET equipped = 0 WHERE user_id = ?", (user_id,))
-            conn.execute("UPDATE strategists SET equipped = 1 WHERE id = ?", (strategist_id,))
-            conn.commit()
-            g_bonus, s_bonus = self.get_slot_bonuses(conn, d["general_id"], strategist_id)
-        new_power = recalc_power(d["troops"], d["barracks_level"], d["forge_level"], d["doctrine"], g_bonus, s_bonus)
-        self.update_player_state(user_id, strategist_id=strategist_id, power=new_power)
-        return f"{who} ✅ Estrategista equipado (id {strategist_id}).\nΔ Poder: {new_power:,}\nPróximo: iniciar simulação de operação".replace(",", ".")
-
-
-
     def do_upgrade_strategist(self, user_id: str) -> str:
         who = self._who(user_id)
         d = self.get_or_create_domain(user_id)
@@ -248,13 +194,9 @@ class GameplayService:
         rank_cost = {"C": 220_000, "B": 560_000, "A": 1_500_000, "S": 3_700_000}
 
         with self.get_conn() as conn:
-            ok, msg = self.has_strategist_gate(d, conn)
-            if not ok:
-                return f"{who} ❌ {msg}"
-
             sid = d["strategist_id"]
             if not sid:
-                return f"{who} ❌ Estrategista não equipado.\nPróximo: equipe um estrategista no painel Militar"
+                return f"{who} ❌ Estrategista não encontrado no feudo."
 
             srow = conn.execute("SELECT id, rank FROM strategists WHERE id = ? AND user_id = ?", (sid, user_id)).fetchone()
             if not srow:
