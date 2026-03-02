@@ -1,0 +1,4 @@
+# Dependências diretas do bot
+# `discord.py[voice]` inclui suporte de voz (requer PyNaCl)
+discord.py[voice]>=2.3,<3
+PyNaCl>=1.5,<2
