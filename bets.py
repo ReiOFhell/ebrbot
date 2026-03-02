@@ -15,18 +15,14 @@ TZ_BR = ZoneInfo("America/Sao_Paulo")
 TICKET_PRICE = 50_000
 MAX_TICKETS_PER_USER_PER_RAFFLE = 1000
 
-RAFFLE_TYPES: dict[str, str] = {
-    "r": "relampago",
-    "d": "diaria",
-    "a": "admin",
-}
+RAFFLE_TYPES: dict[str, str] = {"r": "relampago", "d": "diaria", "a": "admin"}
 RAFFLE_TYPE_ALIASES = {
-    "relampago": "relampago",
-    "diaria": "diaria",
-    "admin": "admin",
-    "a": "admin",
     "r": "relampago",
+    "relampago": "relampago",
     "d": "diaria",
+    "diaria": "diaria",
+    "a": "admin",
+    "admin": "admin",
 }
 RAFFLE_TITLES = {
     "relampago": "🎲 NEXAR | Rifa Relâmpago",
@@ -46,6 +42,15 @@ class RaffleDeps:
 class RaffleService:
     def __init__(self, deps: RaffleDeps):
         self.deps = deps
+
+    @staticmethod
+    def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+        cols = {str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        return column in cols
+
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+        if not self._has_column(conn, table, column):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     def init_db(self) -> None:
         with self.deps.get_conn() as conn:
@@ -105,6 +110,12 @@ class RaffleService:
                 """
             )
 
+            # defensive migrations
+            self._ensure_column(conn, "raffles", "participants_total", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "raffles", "total_pot", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "raffles", "winner_tickets", "INTEGER")
+            self._ensure_column(conn, "raffle_entries", "spent_gold", "INTEGER NOT NULL DEFAULT 0")
+
             conn.execute("CREATE INDEX IF NOT EXISTS idx_raffles_tipo_status_end ON raffles(tipo, status, end_ts)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_raffles_status_end ON raffles(status, end_ts)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_raffle_entries_user ON raffle_entries(user_id)")
@@ -132,22 +143,19 @@ class RaffleService:
         return int(nxt.timestamp())
 
     def _ensure_active_raffle(self, conn: sqlite3.Connection, tipo: str, now: int) -> sqlite3.Row:
+        if tipo not in RAFFLE_TITLES:
+            raise ValueError(f"tipo inválido: {tipo}")
         row = conn.execute(
             "SELECT * FROM raffles WHERE tipo = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
             (tipo,),
         ).fetchone()
         if row:
             return row
-        round_no = int(
-            conn.execute("SELECT COALESCE(MAX(round_no), 0) n FROM raffles WHERE tipo = ?", (tipo,)).fetchone()["n"]
-        )
+        round_no = int(conn.execute("SELECT COALESCE(MAX(round_no), 0) n FROM raffles WHERE tipo = ?", (tipo,)).fetchone()["n"])
         conn.execute(
             """
-            INSERT INTO raffles (
-                tipo, round_no, start_ts, end_ts, status,
-                total_tickets, participants_total, total_pot,
-                created_at_ts, updated_at_ts
-            ) VALUES (?, ?, ?, ?, 'active', 0, 0, 0, ?, ?)
+            INSERT INTO raffles (tipo, round_no, start_ts, end_ts, status, total_tickets, participants_total, total_pot, created_at_ts, updated_at_ts)
+            VALUES (?, ?, ?, ?, 'active', 0, 0, 0, ?, ?)
             """,
             (tipo, round_no + 1, now, self._next_end_ts(tipo, now), now, now),
         )
@@ -166,16 +174,7 @@ class RaffleService:
             (tipo, guild_id, channel_id, self.deps.now_ts()),
         )
 
-    def buy_tickets(
-        self,
-        *,
-        user_id: str,
-        tipo_raw: str,
-        quantity: int,
-        guild_id: str | None,
-        channel_id: str | None,
-        is_admin: bool,
-    ) -> tuple[bool, str]:
+    def buy_tickets(self, *, user_id: str, tipo_raw: str, quantity: int, guild_id: str | None, channel_id: str | None, is_admin: bool) -> tuple[bool, str]:
         tipo = self._normalize_tipo(tipo_raw)
         if not tipo:
             return False, "❌ Tipo inválido. Use r, d ou a/admin."
@@ -187,72 +186,61 @@ class RaffleService:
         self.deps.get_or_create_domain(user_id)
         now = self.deps.now_ts()
 
-        with self.deps.get_conn() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            raffle = self._ensure_active_raffle(conn, tipo, now)
+        try:
+            with self.deps.get_conn() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                raffle = self._ensure_active_raffle(conn, tipo, now)
 
-            current = conn.execute(
-                "SELECT tickets FROM raffle_entries WHERE raffle_id = ? AND user_id = ?",
-                (raffle["id"], user_id),
-            ).fetchone()
-            mine_before = int(current["tickets"] if current else 0)
-            remaining = MAX_TICKETS_PER_USER_PER_RAFFLE - mine_before
-            if remaining <= 0:
-                conn.commit()
-                return False, "❌ Limite atingido: 1000/1000 tickets nesta rifa."
-            if quantity > remaining:
-                conn.commit()
-                return False, f"❌ Limite excedido. Você ainda pode comprar **{remaining}** tickets."
-
-            cost = quantity * TICKET_PRICE
-            gold_row = conn.execute("SELECT gold FROM resources WHERE user_id = ?", (user_id,)).fetchone()
-            gold = int(gold_row["gold"] if gold_row else 0)
-            if gold < cost:
-                conn.commit()
-                return False, f"❌ Ouro insuficiente. Custo: {cost:,} | Falta: {cost-gold:,}".replace(",", ".")
-
-            conn.execute("UPDATE resources SET gold = gold - ?, updated_at_ts = ? WHERE user_id = ?", (cost, now, user_id))
-            conn.execute(
-                """
-                INSERT INTO raffle_entries (raffle_id, user_id, tickets, spent_gold, updated_at_ts)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(raffle_id, user_id) DO UPDATE SET
-                    tickets = tickets + excluded.tickets,
-                    spent_gold = spent_gold + excluded.spent_gold,
-                    updated_at_ts = excluded.updated_at_ts
-                """,
-                (raffle["id"], user_id, quantity, cost, now),
-            )
-            participants_total = int(
-                conn.execute(
-                    "SELECT COUNT(*) c FROM raffle_entries WHERE raffle_id = ? AND tickets > 0",
-                    (raffle["id"],),
-                ).fetchone()["c"]
-            )
-            conn.execute(
-                """
-                UPDATE raffles
-                SET total_tickets = total_tickets + ?,
-                    total_pot = total_pot + ?,
-                    participants_total = ?,
-                    updated_at_ts = ?
-                WHERE id = ?
-                """,
-                (quantity, cost, participants_total, now, raffle["id"]),
-            )
-            self._record_runtime_channel(conn, tipo, guild_id, channel_id)
-
-            updated = conn.execute(
-                "SELECT total_tickets, total_pot, end_ts FROM raffles WHERE id = ?",
-                (raffle["id"],),
-            ).fetchone()
-            mine_after = int(
-                conn.execute(
+                current = conn.execute(
                     "SELECT tickets FROM raffle_entries WHERE raffle_id = ? AND user_id = ?",
                     (raffle["id"], user_id),
-                ).fetchone()["tickets"]
-            )
-            conn.commit()
+                ).fetchone()
+                mine_before = int(current["tickets"] if current else 0)
+                remaining = MAX_TICKETS_PER_USER_PER_RAFFLE - mine_before
+                if remaining <= 0:
+                    conn.commit()
+                    return False, "❌ Limite atingido: 1000/1000 tickets nesta rifa."
+                if quantity > remaining:
+                    conn.commit()
+                    return False, f"❌ Limite excedido. Você ainda pode comprar **{remaining}** tickets."
+
+                cost = quantity * TICKET_PRICE
+                gold_row = conn.execute("SELECT gold FROM resources WHERE user_id = ?", (user_id,)).fetchone()
+                gold = int(gold_row["gold"] if gold_row else 0)
+                if gold < cost:
+                    conn.commit()
+                    return False, f"❌ Ouro insuficiente. Custo: {cost:,} | Falta: {cost-gold:,}".replace(",", ".")
+
+                conn.execute("UPDATE resources SET gold = gold - ?, updated_at_ts = ? WHERE user_id = ?", (cost, now, user_id))
+                conn.execute(
+                    """
+                    INSERT INTO raffle_entries (raffle_id, user_id, tickets, spent_gold, updated_at_ts)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(raffle_id, user_id) DO UPDATE SET
+                        tickets = tickets + excluded.tickets,
+                        spent_gold = spent_gold + excluded.spent_gold,
+                        updated_at_ts = excluded.updated_at_ts
+                    """,
+                    (raffle["id"], user_id, quantity, cost, now),
+                )
+                participants_total = int(conn.execute("SELECT COUNT(*) c FROM raffle_entries WHERE raffle_id = ? AND tickets > 0", (raffle["id"],)).fetchone()["c"])
+                conn.execute(
+                    """
+                    UPDATE raffles
+                    SET total_tickets = total_tickets + ?, total_pot = total_pot + ?, participants_total = ?, updated_at_ts = ?
+                    WHERE id = ?
+                    """,
+                    (quantity, cost, participants_total, now, raffle["id"]),
+                )
+                self._record_runtime_channel(conn, tipo, guild_id, channel_id)
+
+                updated = conn.execute("SELECT total_tickets, total_pot, end_ts FROM raffles WHERE id = ?", (raffle["id"],)).fetchone()
+                mine_after = int(conn.execute("SELECT tickets FROM raffle_entries WHERE raffle_id = ? AND user_id = ?", (raffle["id"], user_id)).fetchone()["tickets"])
+                conn.commit()
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower():
+                return False, "⚠️ Sistema de rifas ocupado no momento. Tente novamente em alguns segundos."
+            raise
 
         total_tickets = int(updated["total_tickets"])
         chance = (mine_after / total_tickets * 100.0) if total_tickets > 0 else 0.0
@@ -275,26 +263,21 @@ class RaffleService:
             raffle = self._ensure_active_raffle(conn, tipo, self.deps.now_ts())
             self._record_runtime_channel(conn, tipo, guild_id, channel_id)
 
-            my_row = conn.execute(
-                "SELECT tickets FROM raffle_entries WHERE raffle_id = ? AND user_id = ?",
-                (raffle["id"], user_id),
-            ).fetchone()
+            my_row = conn.execute("SELECT tickets FROM raffle_entries WHERE raffle_id = ? AND user_id = ?", (raffle["id"], user_id)).fetchone()
             my_tickets = int(my_row["tickets"] if my_row else 0)
             total_tickets = int(raffle["total_tickets"])
             chance = (my_tickets / total_tickets * 100.0) if total_tickets > 0 else 0.0
 
-            state = conn.execute(
-                "SELECT last_winner_id, last_winner_name, last_prize FROM raffle_state WHERE tipo = ?",
-                (tipo,),
-            ).fetchone()
+            state = conn.execute("SELECT last_winner_id, last_winner_name, last_prize FROM raffle_state WHERE tipo = ?", (tipo,)).fetchone()
             conn.commit()
 
+        participants_total = int(raffle["participants_total"] if "participants_total" in raffle.keys() else 0)
         return {
             "tipo": tipo,
             "title": RAFFLE_TITLES[tipo],
             "end_ts": int(raffle["end_ts"]),
             "total_tickets": total_tickets,
-            "participants_total": int(raffle["participants_total"]),
+            "participants_total": participants_total,
             "total_pot": int(raffle["total_pot"]),
             "my_tickets": my_tickets,
             "chance": chance,
@@ -309,14 +292,18 @@ class RaffleService:
 
         with self.deps.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            expired = conn.execute(
-                "SELECT * FROM raffles WHERE status = 'active' AND end_ts <= ? ORDER BY end_ts ASC",
+            conn.execute(
+                "UPDATE raffles SET status = 'closed', updated_at_ts = ? WHERE status = 'active' AND tipo NOT IN ('relampago','diaria','admin')",
                 (now,),
-            ).fetchall()
+            )
+            expired = conn.execute("SELECT * FROM raffles WHERE status = 'active' AND end_ts <= ? ORDER BY end_ts ASC", (now,)).fetchall()
 
             for raffle in expired:
                 raffle_id = int(raffle["id"])
                 tipo = str(raffle["tipo"])
+                if tipo not in RAFFLE_TITLES:
+                    conn.execute("UPDATE raffles SET status = 'closed', updated_at_ts = ? WHERE id = ?", (now, raffle_id))
+                    continue
                 locked = conn.execute(
                     "UPDATE raffles SET status = 'closing', updated_at_ts = ? WHERE id = ? AND status = 'active'",
                     (now, raffle_id),
@@ -324,10 +311,7 @@ class RaffleService:
                 if locked == 0:
                     continue
 
-                entries = conn.execute(
-                    "SELECT user_id, tickets FROM raffle_entries WHERE raffle_id = ? AND tickets > 0 ORDER BY user_id",
-                    (raffle_id,),
-                ).fetchall()
+                entries = conn.execute("SELECT user_id, tickets FROM raffle_entries WHERE raffle_id = ? AND tickets > 0 ORDER BY user_id", (raffle_id,)).fetchall()
                 participants = [{"user_id": str(e["user_id"]), "tickets": int(e["tickets"])} for e in entries]
                 total_tickets = int(raffle["total_tickets"])
                 total_pot = int(raffle["total_pot"])
@@ -347,22 +331,12 @@ class RaffleService:
                             winner_tickets = int(p["tickets"])
                             break
                     if winner_id:
-                        conn.execute(
-                            "UPDATE resources SET gold = gold + ?, updated_at_ts = ? WHERE user_id = ?",
-                            (total_pot, now, winner_id),
-                        )
+                        conn.execute("UPDATE resources SET gold = gold + ?, updated_at_ts = ? WHERE user_id = ?", (total_pot, now, winner_id))
                         winner_name = winner_id
 
                 conn.execute(
                     """
-                    UPDATE raffles
-                    SET status = 'closed',
-                        winner_id = ?,
-                        winner_tickets = ?,
-                        participants_total = ?,
-                        closed_at_ts = ?,
-                        updated_at_ts = ?
-                    WHERE id = ?
+                    UPDATE raffles SET status='closed', winner_id=?, winner_tickets=?, participants_total=?, closed_at_ts=?, updated_at_ts=? WHERE id=?
                     """,
                     (winner_id, winner_tickets, participants_total, now, now, raffle_id),
                 )
@@ -379,16 +353,11 @@ class RaffleService:
                     """,
                     (tipo, winner_id, winner_name, total_pot, now, now),
                 )
-
-                rt = conn.execute(
-                    "SELECT last_channel_id FROM raffle_runtime WHERE tipo = ?",
-                    (tipo,),
-                ).fetchone()
-
+                rt = conn.execute("SELECT last_channel_id FROM raffle_runtime WHERE tipo = ?", (tipo,)).fetchone()
                 settlements.append(
                     {
                         "tipo": tipo,
-                        "title": RAFFLE_TITLES[tipo],
+                        "title": RAFFLE_TITLES.get(tipo, f"🎲 NEXAR | Rifa {tipo.title()}"),
                         "winner_id": winner_id,
                         "winner_name": winner_name,
                         "winner_tickets": winner_tickets,
@@ -399,40 +368,29 @@ class RaffleService:
                         "channel_id": str(rt["last_channel_id"]) if rt and rt["last_channel_id"] else None,
                     }
                 )
-
                 self._ensure_active_raffle(conn, tipo, now)
 
             conn.commit()
+
         return settlements
 
 
 def build_raffle_embed(data: dict[str, object], *, tipo_alias: str) -> discord.Embed:
-    tipo = str(data["tipo"])
-    end_ts = int(data["end_ts"])
-    total_tickets = int(data["total_tickets"])
-    my_tickets = int(data["my_tickets"])
-    chance = float(data["chance"])
-
     if data["last_winner_id"]:
         last_line = f"{data['last_winner_name']} ({data['last_winner_id']}) (+{int(data['last_prize']):,} ouro)".replace(",", ".")
     else:
         last_line = "Nenhum ainda."
 
+    end_ts = int(data["end_ts"])
     embed = discord.Embed(title=str(data["title"]), color=discord.Color.gold())
     embed.add_field(name="💰 Prêmio atual", value=f"{int(data['total_pot']):,} ouro".replace(",", "."), inline=True)
-    embed.add_field(name="🎟️ Tickets totais", value=f"{total_tickets:,} tickets".replace(",", "."), inline=True)
+    embed.add_field(name="🎟️ Tickets totais", value=f"{int(data['total_tickets']):,} tickets".replace(",", "."), inline=True)
     embed.add_field(name="👥 Participantes", value=str(int(data["participants_total"])), inline=True)
-    embed.add_field(name="🧾 Seus tickets", value=f"{my_tickets}/1000", inline=True)
-    embed.add_field(name="📊 Sua chance atual", value=f"{chance:.2f}%", inline=True)
+    embed.add_field(name="🧾 Seus tickets", value=f"{int(data['my_tickets'])}/1000", inline=True)
+    embed.add_field(name="📊 Sua chance atual", value=f"{float(data['chance']):.2f}%", inline=True)
     embed.add_field(name="🤑 Último ganhador", value=last_line, inline=False)
     embed.add_field(name="⏳ Resultado", value=f"<t:{end_ts}:F> • <t:{end_ts}:R>", inline=False)
-    embed.add_field(
-        name="🛒 Comprar",
-        value=(
-            f"`!rifa b {tipo_alias} 10` / `!rifa buy {tipo_alias} 10`"
-        ),
-        inline=False,
-    )
+    embed.add_field(name="🛒 Comprar", value=f"`!rifa b {tipo_alias} 10` / `!rifa buy {tipo_alias} 10`", inline=False)
     embed.set_footer(text="Ticket: 50.000 ouro • Limite: 1000 por pessoa/por rifa • 1 vencedor")
     return embed
 
@@ -447,14 +405,14 @@ class RaffleLoop:
         total_tickets = int(settlement["total_tickets"])
         if total_tickets <= 0:
             return False
-
         winner_id = str(settlement["winner_id"]) if settlement["winner_id"] else None
+
         dm_failed = False
         for p in settlement["participants"]:
-            user_id = str(p["user_id"])
+            uid = str(p["user_id"])
             tickets = int(p["tickets"])
             chance = (tickets / total_tickets) * 100.0
-            won = winner_id is not None and user_id == winner_id
+            won = winner_id is not None and uid == winner_id
             result_line = f"✅ VOCÊ GANHOU +{int(settlement['total_pot']):,} ouro" if won else f"❌ você não foi escolhido; vencedor foi <@{winner_id}>"
             msg = (
                 f"🎲 A rifa acabou!\n"
@@ -463,10 +421,10 @@ class RaffleLoop:
                 f"Sua chance final: {chance:.2f}% ({tickets}/{total_tickets})\n"
                 f"{result_line}"
             ).replace(",", ".")
-            user = self.bot.get_user(int(user_id))
+            user = self.bot.get_user(int(uid))
             if user is None:
                 try:
-                    user = await self.bot.fetch_user(int(user_id))
+                    user = await self.bot.fetch_user(int(uid))
                 except Exception:
                     dm_failed = True
                     continue
@@ -532,29 +490,26 @@ def setup_bets(
     logger: Logger,
 ) -> tuple[RaffleService, RaffleLoop]:
     del update_player_state
-    deps = RaffleDeps(get_conn=get_conn, get_or_create_domain=get_or_create_domain, now_ts=now_ts, logger=logger)
-    service = RaffleService(deps)
+    service = RaffleService(RaffleDeps(get_conn=get_conn, get_or_create_domain=get_or_create_domain, now_ts=now_ts, logger=logger))
     service.init_db()
     loop = RaffleLoop(bot=bot, service=service, logger=logger)
 
     @bot.command(name="rifa")
     async def rifa(ctx: commands.Context, *args: str) -> None:
-        user_id = str(ctx.author.id)
-        guild_id = str(ctx.guild.id) if ctx.guild else None
-        channel_id = str(ctx.channel.id) if ctx.channel else None
+        uid = str(ctx.author.id)
+        gid = str(ctx.guild.id) if ctx.guild else None
+        cid = str(ctx.channel.id) if ctx.channel else None
         is_admin = bool(ctx.guild and ctx.author.guild_permissions.administrator)
 
         if not args:
             entries = [("r", "relampago"), ("d", "diaria")]
             if is_admin:
                 entries.append(("a", "admin"))
-            embeds = [
-                build_raffle_embed(
-                    service.get_panel_data(tipo_raw=tipo, user_id=user_id, guild_id=guild_id, channel_id=channel_id),
-                    tipo_alias=alias,
-                )
-                for alias, tipo in entries
-            ]
+            embeds = []
+            for alias, tipo in entries:
+                data = service.get_panel_data(tipo_raw=tipo, user_id=uid, guild_id=gid, channel_id=cid)
+                if data:
+                    embeds.append(build_raffle_embed(data, tipo_alias=alias))
             await ctx.send(content=f"<@{ctx.author.id}>", embeds=embeds)
             return
 
@@ -565,32 +520,23 @@ def setup_bets(
                 return
             tipo_raw = args[1]
             try:
-                quantity = int(args[2])
+                qtd = int(args[2])
             except ValueError:
                 await ctx.send("❌ Quantidade inválida. Use inteiro > 0.")
                 return
-
-            ok, msg = service.buy_tickets(
-                user_id=user_id,
-                tipo_raw=tipo_raw,
-                quantity=quantity,
-                guild_id=guild_id,
-                channel_id=channel_id,
-                is_admin=is_admin,
-            )
+            ok, msg = service.buy_tickets(user_id=uid, tipo_raw=tipo_raw, quantity=qtd, guild_id=gid, channel_id=cid, is_admin=is_admin)
             await ctx.send(f"<@{ctx.author.id}>\n{msg}" if ok else f"<@{ctx.author.id}> {msg}")
             return
 
-        # painel direto: !rifa r / !rifa d / !rifa a
-        panel = service.get_panel_data(tipo_raw=first, user_id=user_id, guild_id=guild_id, channel_id=channel_id)
-        if panel is None:
+        data = service.get_panel_data(tipo_raw=first, user_id=uid, guild_id=gid, channel_id=cid)
+        if not data:
             await ctx.send("❌ Uso: `!rifa`, `!rifa r`, `!rifa d`, `!rifa a`, `!rifa b <tipo> <qtd>`, `!rifa buy <tipo> <qtd>`")
             return
-        if panel["tipo"] == "admin" and not is_admin:
+        if data["tipo"] == "admin" and not is_admin:
             await ctx.send("❌ A rifa admin é exclusiva para administradores.")
             return
-        alias = "r" if panel["tipo"] == "relampago" else ("d" if panel["tipo"] == "diaria" else "a")
-        await ctx.send(content=f"<@{ctx.author.id}>", embed=build_raffle_embed(panel, tipo_alias=alias))
+        alias = "r" if data["tipo"] == "relampago" else ("d" if data["tipo"] == "diaria" else "a")
+        await ctx.send(content=f"<@{ctx.author.id}>", embed=build_raffle_embed(data, tipo_alias=alias))
 
     @bot.command(name="rifas")
     async def rifas(ctx: commands.Context) -> None:
