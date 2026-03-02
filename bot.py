@@ -61,6 +61,11 @@ DOCTRINES = {"cerco", "choque", "furtivo", "arcano"}
 GENERAL_RANK_BONUS = {"C": 0.02, "B": 0.04, "A": 0.06, "S": 0.10}
 STRATEGIST_RANK_BONUS = {"C": 0.015, "B": 0.03, "A": 0.05, "S": 0.08}
 MAX_BUILDING_TIER = 10
+HOUSE_ID = "NEXAR_HOUSE"
+HOUSE_INITIAL_GOLD = 1_000_000_000
+PAY_MIN = 1
+PAY_MAX = 50_000_000
+PAY_FEE_PCT = 0.02
 
 
 def now_ts() -> int:
@@ -334,6 +339,30 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS house_bank (
+                house_id TEXT PRIMARY KEY,
+                gold INTEGER NOT NULL DEFAULT 0,
+                updated_at_ts INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tx_type TEXT NOT NULL,
+                from_user_id TEXT,
+                to_user_id TEXT,
+                gross_amount INTEGER NOT NULL,
+                fee_amount INTEGER NOT NULL,
+                net_amount INTEGER NOT NULL,
+                note TEXT,
+                created_at_ts INTEGER NOT NULL
+            )
+            """
+        )
 
         # Compatibilidade incremental base (fundação do domínio)
         ensure_column(conn, "domains", "created_at_ts", "INTEGER NOT NULL DEFAULT 0")
@@ -393,8 +422,21 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_panel_events_name ON panel_events(event_name)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_command_errors_ts ON command_errors(created_at_ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_discoveries_user ON discoveries_log(user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_transactions_ts ON transactions(created_at_ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_transactions_from ON transactions(from_user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_transactions_to ON transactions(to_user_id)")
 
         now = now_ts()
+        conn.execute(
+            "INSERT OR IGNORE INTO house_bank (house_id, gold, updated_at_ts) VALUES (?, ?, ?)",
+            (HOUSE_ID, HOUSE_INITIAL_GOLD, now),
+        )
+        house_count = conn.execute("SELECT COUNT(*) c FROM house_bank").fetchone()["c"]
+        if int(house_count or 0) == 0:
+            conn.execute(
+                "INSERT INTO house_bank (house_id, gold, updated_at_ts) VALUES (?, ?, ?)",
+                (HOUSE_ID, HOUSE_INITIAL_GOLD, now),
+            )
         season_end = now + (30 * 24 * 3600)
         conn.execute(
             """
@@ -561,6 +603,59 @@ def log_command_error(user_id: str | None, command_name: str, error: Exception) 
             conn.commit()
     except Exception:
         logger.exception("Falha ao persistir command_errors")
+
+
+def get_house_gold() -> int:
+    with get_conn() as conn:
+        row = conn.execute("SELECT gold FROM house_bank WHERE house_id = ?", (HOUSE_ID,)).fetchone()
+        if row:
+            return int(row["gold"] or 0)
+        ts = now_ts()
+        conn.execute(
+            "INSERT OR IGNORE INTO house_bank (house_id, gold, updated_at_ts) VALUES (?, ?, ?)",
+            (HOUSE_ID, HOUSE_INITIAL_GOLD, ts),
+        )
+        conn.commit()
+        row = conn.execute("SELECT gold FROM house_bank WHERE house_id = ?", (HOUSE_ID,)).fetchone()
+        return int(row["gold"] if row else HOUSE_INITIAL_GOLD)
+
+
+def set_house_gold(value: int) -> None:
+    ts = now_ts()
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO house_bank (house_id, gold, updated_at_ts) VALUES (?, ?, ?)",
+            (HOUSE_ID, HOUSE_INITIAL_GOLD, ts),
+        )
+        conn.execute("UPDATE house_bank SET gold = ?, updated_at_ts = ? WHERE house_id = ?", (max(0, int(value)), ts, HOUSE_ID))
+        conn.commit()
+
+
+def add_house_gold(delta: int) -> int:
+    ts = now_ts()
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO house_bank (house_id, gold, updated_at_ts) VALUES (?, ?, ?)",
+            (HOUSE_ID, HOUSE_INITIAL_GOLD, ts),
+        )
+        current = int(conn.execute("SELECT gold FROM house_bank WHERE house_id = ?", (HOUSE_ID,)).fetchone()["gold"] or 0)
+        updated = max(0, current + int(delta))
+        conn.execute("UPDATE house_bank SET gold = ?, updated_at_ts = ? WHERE house_id = ?", (updated, ts, HOUSE_ID))
+        conn.commit()
+        return updated
+
+
+def log_tx(*, tx_type: str, from_user_id: str | None, to_user_id: str | None, gross_amount: int, fee_amount: int,
+           net_amount: int, note: str | None = None) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO transactions (tx_type, from_user_id, to_user_id, gross_amount, fee_amount, net_amount, note, created_at_ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (tx_type, from_user_id, to_user_id, int(gross_amount), int(fee_amount), int(net_amount), note, now_ts()),
+        )
+        conn.commit()
 
 
 def get_global_modifiers() -> dict[str, float]:
@@ -1437,6 +1532,100 @@ async def addouro_error(ctx: commands.Context, error: commands.CommandError) -> 
         return
     logger.exception("Erro em !addouro", exc_info=error)
     await ctx.send("Erro interno ao adicionar ouro.")
+
+
+@bot.command(name="pay")
+async def pay(ctx: commands.Context, membro: discord.Member | None = None, quantidade: int | None = None) -> None:
+    if membro is None or quantidade is None:
+        await ctx.send("Uso: `!pay @membro <quantidade>`")
+        return
+    if membro.id == ctx.author.id:
+        await ctx.send("❌ Você não pode transferir ouro para si mesmo.")
+        return
+    if membro.bot:
+        await ctx.send("❌ Não é possível transferir ouro para bots.")
+        return
+    if quantidade < PAY_MIN or quantidade > PAY_MAX:
+        await ctx.send(f"❌ Quantidade inválida. Limites: {PAY_MIN:,} até {PAY_MAX:,}.".replace(",", "."))
+        return
+
+    sender_id = str(ctx.author.id)
+    receiver_id = str(membro.id)
+    d_sender = get_or_create_domain(sender_id)
+    d_receiver = get_or_create_domain(receiver_id)
+
+    gross = int(quantidade)
+    fee = int(gross * PAY_FEE_PCT)
+    net = gross - fee
+    if net <= 0:
+        await ctx.send("❌ Transferência inválida: valor líquido ficou menor ou igual a zero.")
+        return
+
+    sender_gold = int(d_sender["gold"] or 0)
+    if sender_gold < gross:
+        falta = gross - sender_gold
+        await ctx.send(f"❌ Saldo insuficiente. Falta {falta:,} ouro.".replace(",", "."))
+        return
+
+    receiver_gold = int(d_receiver["gold"] or 0)
+    update_player_state(sender_id, gold=sender_gold - gross)
+    update_player_state(receiver_id, gold=receiver_gold + net)
+    add_house_gold(fee)
+    log_tx(
+        tx_type="PAY",
+        from_user_id=sender_id,
+        to_user_id=receiver_id,
+        gross_amount=gross,
+        fee_amount=fee,
+        net_amount=net,
+        note=f"pay:{ctx.author.id}->{membro.id}",
+    )
+
+    embed = discord.Embed(title="🏦 NEXAR • Transferência confirmada", color=discord.Color.green())
+    embed.add_field(name="Remetente", value=f"<@{ctx.author.id}>", inline=False)
+    embed.add_field(name="Destinatário", value=f"<@{membro.id}>", inline=False)
+    embed.add_field(name="Valor bruto", value=f"{gross:,} ouro".replace(",", "."), inline=True)
+    embed.add_field(name="Taxa da Casa (2%)", value=f"{fee:,} ouro".replace(",", "."), inline=True)
+    embed.add_field(name="Valor líquido recebido", value=f"{net:,} ouro".replace(",", "."), inline=True)
+    await ctx.send(embed=embed)
+
+    try:
+        await ctx.author.send(
+            (
+                f"🏦 Recibo NEXAR\n"
+                f"Você enviou {gross:,} ouro para {membro.display_name}.\n"
+                f"Taxa da Casa: {fee:,} | Líquido entregue: {net:,}."
+            ).replace(",", ".")
+        )
+    except Exception:
+        pass
+
+    try:
+        await membro.send(
+            (
+                f"🏦 Você recebeu uma transferência via NEXAR\n"
+                f"Origem: {ctx.author.display_name}\n"
+                f"Valor líquido recebido: {net:,} ouro."
+            ).replace(",", ".")
+        )
+    except Exception:
+        pass
+
+
+@bot.command(name="cofre", hidden=True)
+@commands.has_permissions(administrator=True)
+async def cofre(ctx: commands.Context) -> None:
+    gold = get_house_gold()
+    await ctx.send(f"🏦 Cofre NEXAR: **{gold:,} ouro**".replace(",", "."))
+
+
+@cofre.error
+async def cofre_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Apenas administradores podem usar `!cofre`.")
+        return
+    logger.exception("Erro em !cofre", exc_info=error)
+    await ctx.send("Erro interno ao consultar cofre.")
 
 
 def delete_domain_data(user_id: str) -> None:
