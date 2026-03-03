@@ -13,6 +13,8 @@ from zoneinfo import ZoneInfo
 import discord
 from discord.ext import commands, tasks
 
+from core.money import format_money, parse_money
+
 TZ_BR = ZoneInfo("America/Sao_Paulo")
 TICKET_PRICE = 50_000
 MAX_TICKETS_PER_USER_PER_RAFFLE = 1000
@@ -295,11 +297,11 @@ class RaffleService:
         chance = (mine_after / total_tickets * 100.0) if total_tickets > 0 else 0.0
         return True, (
             f"✅ Aposta confirmada: +{quantity} tickets\n"
-            f"💰 Δ Ouro: -{cost:,}\n"
+            f"💰 Δ Ouro: -{format_money(cost)}\n"
             f"🎟️ Seus tickets: {mine_after}/1000\n"
             f"📊 Sua chance agora: {chance:.2f}%\n"
             f"⏳ Resultado: <t:{int(updated['end_ts'])}:R>"
-        ).replace(",", ".")
+        )
 
     def get_panel_data(self, *, tipo_raw: str, user_id: str, guild_id: str | None, channel_id: str | None) -> dict[str, object] | None:
         tipo = self._normalize_tipo(tipo_raw)
@@ -500,7 +502,7 @@ class RaffleLoop:
         embed = discord.Embed(title="🎉 Rifa encerrada!", color=discord.Color.dark_gold())
         embed.add_field(name="Rifa", value=str(settlement["title"]), inline=False)
         embed.add_field(name="Vencedor", value=winner, inline=True)
-        embed.add_field(name="Prêmio", value=f"{int(settlement['total_pot']):,} ouro".replace(",", "."), inline=True)
+        embed.add_field(name="Prêmio", value=f"{format_money(int(settlement['total_pot']))} ouro", inline=True)
         embed.add_field(name="Participantes", value=str(int(settlement["participants_total"])), inline=True)
         embed.add_field(name="Tickets totais", value=f"{int(settlement['total_tickets']):,}".replace(",", "."), inline=True)
         await channel.send(embed=embed)
@@ -530,20 +532,27 @@ class RaffleLoop:
 
 
 def _draw_card() -> str:
-    return random.choice(["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"])
+    rank = random.choice(["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"])
+    suit = random.choice(["♠️", "♥️", "♦️", "♣️"])
+    return f"{rank}{suit}"
+
+
+def _rank(card: str) -> str:
+    return card.replace("♠️", "").replace("♥️", "").replace("♦️", "").replace("♣️", "")
 
 
 def _hand_total(hand: list[str]) -> int:
     total = 0
     aces = 0
     for c in hand:
-        if c in {"J", "Q", "K"}:
+        r = _rank(c)
+        if r in {"J", "Q", "K"}:
             total += 10
-        elif c == "A":
+        elif r == "A":
             aces += 1
             total += 11
         else:
-            total += int(c)
+            total += int(r)
     while total > 21 and aces > 0:
         total -= 10
         aces -= 1
@@ -759,18 +768,26 @@ class BlackjackService:
 
 
 def build_bj_embed(*, user: discord.abc.User, bet: int, player: list[str], dealer: list[str], finished: bool,
-                   result_line: str | None = None, profit: int | None = None) -> discord.Embed:
+                   result_line: str | None = None, profit: int | None = None, status_line: str | None = None,
+                   last_pull: str | None = None, payout: int | None = None, fee_line: str | None = None) -> discord.Embed:
     p_total = _hand_total(player)
     shown_dealer = dealer if finished else [dealer[0], "?"]
     d_total = _hand_total(dealer) if finished else "?"
     embed = discord.Embed(title="🎲 NEXAR | Mesa Imperial — Blackjack", color=discord.Color.dark_gold())
-    embed.add_field(name="Aposta Selada", value=f"{bet:,} ouro".replace(",", "."), inline=False)
+    desc = [f"🪙 Aposta: {format_money(bet)}", f"⏳ Status: {'Rodada encerrada' if finished else 'Sua vez'}", "🕯️ O Trono observa o seu risco."]
+    if fee_line:
+        desc.insert(1, fee_line)
+    embed.description = "\n".join(desc)
+    embed.add_field(name="Aposta Selada", value=f"{format_money(bet)} ouro", inline=False)
     embed.add_field(name="Croupier do Trono", value=f"{_hand_text(shown_dealer)} (Total: {d_total})", inline=False)
     embed.add_field(name="Jogador", value=f"{_hand_text(player)} (Total: {p_total})", inline=False)
-    embed.add_field(name="Estado", value="Sentença do Croupier" if finished else "Sua vez", inline=False)
+    embed.add_field(name="Estado", value=status_line or ("Sentença do Croupier" if finished else "Sua vez"), inline=False)
+    if last_pull:
+        embed.add_field(name="Ação", value=last_pull, inline=False)
     if result_line:
-        delta = f"\nΔ Ouro: {profit:+,}".replace(",", ".") if profit is not None else ""
-        embed.add_field(name="Resultado", value=f"{result_line}{delta}", inline=False)
+        retorno = f"\nRetorno: {format_money(payout or 0)}" if payout is not None else ""
+        lucro = f"\nLucro: {format_money(profit or 0)}"
+        embed.add_field(name="Resultado", value=f"{result_line}\nAposta: {format_money(bet)}{retorno}{lucro}", inline=False)
     return embed
 
 
@@ -801,12 +818,16 @@ class BlackjackView(discord.ui.View):
             if random.random() < BJ_FLAVOR_CHANCE:
                 flavor = "\n📜 Fragmento: \"A moeda não tem lado… só preço.\""
             result_map = {
-                "blackjack": "🃏 Blackjack Imperial!",
-                "win": "✅ Vitória.",
-                "push": "⚖️ Empate.",
-                "lose": "❌ Derrota.",
+                "blackjack": "🟣 BLACKJACK\n🃏 Blackjack Imperial!",
+                "win": "🟢 VITÓRIA\n✅ Vitória.",
+                "push": "🟡 EMPATE\n⚖️ Empate.",
+                "lose": "⚫ ESTOUROU\n❌ Derrota." if _hand_total(data["player"]) > 21 else "🔴 DERROTA\n❌ Derrota.",
                 "surrender": "🏳️ Rendição aceita.",
             }
+            if str(data["result"]) == "win" and _hand_total(data["dealer"]) > 21:
+                result_map["win"] = "🔵 CROUPIER ESTOUROU\n✅ Vitória."
+            if str(data["result"]) == "surrender":
+                result_map["surrender"] = "🔴 DERROTA\n🏳️ Rendição aceita."
             line = result_map.get(str(data["result"]), "Fim da rodada.") + flavor
             embed = build_bj_embed(
                 user=interaction.user,
@@ -816,9 +837,17 @@ class BlackjackView(discord.ui.View):
                 finished=True,
                 result_line=line,
                 profit=int(data["profit"]),
+                payout=int(data["payout"]),
+                status_line="Rodada encerrada",
             )
             await interaction.response.edit_message(embed=embed, view=self)
             return
+
+        last_pull = None
+        if action == "hit":
+            last_pull = f"✅ Você puxou: {data['player'][-1]} (Total: {_hand_total(data['player'])})"
+        elif action == "stand":
+            last_pull = f"🛑 Você parou em {_hand_total(data['player'])}. Croupier revelando…"
 
         embed = build_bj_embed(
             user=interaction.user,
@@ -826,6 +855,8 @@ class BlackjackView(discord.ui.View):
             player=data["player"],
             dealer=data["dealer"],
             finished=False,
+            last_pull=last_pull,
+            status_line="Sua vez",
         )
         await interaction.response.edit_message(embed=embed, view=self)
 
@@ -865,6 +896,8 @@ class BlackjackView(discord.ui.View):
                 finished=True,
                 result_line="⏳ Tempo esgotado: a mesa foi encerrada por stand automático.",
                 profit=int(data["profit"]),
+                payout=int(data["payout"]),
+                status_line="Rodada encerrada",
             )
             try:
                 await self.message.edit(embed=embed, view=self)
@@ -918,9 +951,9 @@ def setup_bets(
                 return
             tipo_raw = args[1]
             try:
-                qtd = int(args[2])
+                qtd = int(parse_money(args[2]))
             except ValueError:
-                await ctx.send("❌ Quantidade inválida. Use inteiro > 0.")
+                await ctx.send("❌ Valor inválido. Use: 10k, 2.5m, 1bi.")
                 return
             ok, msg = service.buy_tickets(user_id=uid, tipo_raw=tipo_raw, quantity=qtd, guild_id=gid, channel_id=cid, is_admin=is_admin)
             await ctx.send(f"<@{ctx.author.id}>\n{msg}" if ok else f"<@{ctx.author.id}> {msg}")
@@ -950,10 +983,11 @@ def setup_bets(
                 "Payouts: Blackjack +1.5x lucro | Vitória +1x | Empate 0 | Derrota -1x | Render-se -0.5x"
             )
             return
-        if not aposta.isdigit():
-            await ctx.send("❌ A aposta deve ser um inteiro positivo (sem decimal).")
+        try:
+            bet = parse_money(aposta)
+        except ValueError:
+            await ctx.send("❌ Valor inválido. Use: 10k, 2.5m, 1bi.")
             return
-        bet = int(aposta)
         ok, msg, sid = bj_service.start_session(str(ctx.author.id), bet)
         if not ok or sid is None:
             await ctx.send(f"<@{ctx.author.id}> {msg}")

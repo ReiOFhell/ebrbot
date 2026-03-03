@@ -9,6 +9,7 @@ import discord
 from discord.ext import commands
 
 from bets import setup_bets
+from core.money import format_money, parse_money
 from core.economy import (
     TRAIN_COOLDOWN_SECONDS,
     barracks_train_amount,
@@ -1503,25 +1504,32 @@ async def economia_teste(ctx: commands.Context) -> None:
 
 @bot.command(name="addouro", hidden=True)
 @commands.has_permissions(administrator=True)
-async def addouro(ctx: commands.Context, membro: discord.Member | None = None, quantidade: int | None = None) -> None:
+async def addouro(ctx: commands.Context, membro: discord.Member | None = None, quantidade: str | None = None) -> None:
     if membro is None or quantidade is None:
         await ctx.send("Uso: `!addouro @membro <quantidade>`")
         return
-    if quantidade <= 0:
+    try:
+        amount = parse_money(quantidade)
+    except ValueError:
+        await ctx.send("❌ Valor inválido. Use: 10k, 2.5m, 1bi.")
+        return
+    if amount <= 0:
         await ctx.send("❌ A quantidade deve ser maior que zero.")
         return
 
     alvo_id = str(membro.id)
     d = get_or_create_domain(alvo_id)
-    novo_saldo = int(d["gold"] or 0) + quantidade
+    old_saldo = int(d["gold"] or 0)
+    novo_saldo = old_saldo + amount
     update_player_state(alvo_id, gold=novo_saldo)
 
     await ctx.send(
         (
             f"<@{ctx.author.id}> ✅ Ouro adicionado para <@{membro.id}>.\n"
-            f"Δ Ouro: +{quantidade:,}\n"
-            f"Saldo atual do alvo: {novo_saldo:,}"
-        ).replace(",", ".")
+            f"Δ Ouro: +{format_money(amount)}\n"
+            f"Saldo anterior: {format_money(old_saldo)}\n"
+            f"Saldo atual do alvo: {format_money(novo_saldo)}"
+        )
     )
 
 
@@ -1535,7 +1543,7 @@ async def addouro_error(ctx: commands.Context, error: commands.CommandError) -> 
 
 
 @bot.command(name="pay")
-async def pay(ctx: commands.Context, membro: discord.Member | None = None, quantidade: int | None = None) -> None:
+async def pay(ctx: commands.Context, membro: discord.Member | None = None, quantidade: str | None = None) -> None:
     if membro is None or quantidade is None:
         await ctx.send("Uso: `!pay @membro <quantidade>`")
         return
@@ -1545,7 +1553,13 @@ async def pay(ctx: commands.Context, membro: discord.Member | None = None, quant
     if membro.bot:
         await ctx.send("❌ Não é possível transferir ouro para bots.")
         return
-    if quantidade < PAY_MIN or quantidade > PAY_MAX:
+    try:
+        gross = parse_money(quantidade)
+    except ValueError:
+        await ctx.send("❌ Valor inválido. Use: 10k, 2.5m, 1bi.")
+        return
+
+    if gross < PAY_MIN or gross > PAY_MAX:
         await ctx.send(f"❌ Quantidade inválida. Limites: {PAY_MIN:,} até {PAY_MAX:,}.".replace(",", "."))
         return
 
@@ -1554,7 +1568,6 @@ async def pay(ctx: commands.Context, membro: discord.Member | None = None, quant
     d_sender = get_or_create_domain(sender_id)
     d_receiver = get_or_create_domain(receiver_id)
 
-    gross = int(quantidade)
     fee = int(gross * PAY_FEE_PCT)
     net = gross - fee
     if net <= 0:
@@ -1564,7 +1577,7 @@ async def pay(ctx: commands.Context, membro: discord.Member | None = None, quant
     sender_gold = int(d_sender["gold"] or 0)
     if sender_gold < gross:
         falta = gross - sender_gold
-        await ctx.send(f"❌ Saldo insuficiente. Falta {falta:,} ouro.".replace(",", "."))
+        await ctx.send(f"❌ Saldo insuficiente. Falta {format_money(falta)} ouro.")
         return
 
     receiver_gold = int(d_receiver["gold"] or 0)
@@ -1584,18 +1597,18 @@ async def pay(ctx: commands.Context, membro: discord.Member | None = None, quant
     embed = discord.Embed(title="🏦 NEXAR • Transferência confirmada", color=discord.Color.green())
     embed.add_field(name="Remetente", value=f"<@{ctx.author.id}>", inline=False)
     embed.add_field(name="Destinatário", value=f"<@{membro.id}>", inline=False)
-    embed.add_field(name="Valor bruto", value=f"{gross:,} ouro".replace(",", "."), inline=True)
-    embed.add_field(name="Taxa da Casa (2%)", value=f"{fee:,} ouro".replace(",", "."), inline=True)
-    embed.add_field(name="Valor líquido recebido", value=f"{net:,} ouro".replace(",", "."), inline=True)
+    embed.add_field(name="Valor bruto", value=f"{format_money(gross)} ouro", inline=True)
+    embed.add_field(name="Taxa da Casa (2%)", value=f"{format_money(fee)} ouro", inline=True)
+    embed.add_field(name="Valor líquido recebido", value=f"{format_money(net)} ouro", inline=True)
     await ctx.send(embed=embed)
 
     try:
         await ctx.author.send(
             (
                 f"🏦 Recibo NEXAR\n"
-                f"Você enviou {gross:,} ouro para {membro.display_name}.\n"
-                f"Taxa da Casa: {fee:,} | Líquido entregue: {net:,}."
-            ).replace(",", ".")
+                f"📤 Você enviou {format_money(gross)} para {membro.display_name}.\n"
+                f"Taxa da Casa: {format_money(fee)} | Líquido entregue: {format_money(net)}."
+            )
         )
     except Exception:
         pass
@@ -1605,8 +1618,8 @@ async def pay(ctx: commands.Context, membro: discord.Member | None = None, quant
             (
                 f"🏦 Você recebeu uma transferência via NEXAR\n"
                 f"Origem: {ctx.author.display_name}\n"
-                f"Valor líquido recebido: {net:,} ouro."
-            ).replace(",", ".")
+                f"📥 Você recebeu {format_money(net)} de {ctx.author.display_name}."
+            )
         )
     except Exception:
         pass
@@ -1616,7 +1629,7 @@ async def pay(ctx: commands.Context, membro: discord.Member | None = None, quant
 @commands.has_permissions(administrator=True)
 async def cofre(ctx: commands.Context) -> None:
     gold = get_house_gold()
-    await ctx.send(f"🏦 Cofre NEXAR: **{gold:,} ouro**".replace(",", "."))
+    await ctx.send(f"🏦 Cofre NEXAR: **{format_money(gold)} ouro**")
 
 
 @cofre.error
