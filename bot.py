@@ -1779,7 +1779,9 @@ GUIDE_PAGES: list[tuple[str, str]] = [
         "**Comandos públicos**\n"
         "`!dominio` → jogar o núcleo inteiro por clique\n"
         "`!rank` → comparar riqueza/poder/prestígio\n"
-        "`!guia` → onboarding por páginas\n\n"
+        "`!guia` → onboarding por páginas\n"
+        "`!bj <aposta>` → abrir Mesa Imperial (Blackjack)\n"
+        "`!bjstats` / `!bjrank` → estatísticas e ranking do blackjack\n\n"
         f"**{APP_NAME}:** {APP_SLOGAN}\n"
         "**Admin (oculto):** `!admin`, `!addouro`, `!excluirdominio`, `!diagnostico`, `!painel_kpis`, `!economia_teste`, `!decreto_soberano`\n"
         "**Dica:** se uma view expirar, use `🔄 Reabrir Painel`.",

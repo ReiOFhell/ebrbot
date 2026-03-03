@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import json
 from logging import Logger
 import random
 import sqlite3
+import time
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -14,6 +16,9 @@ from discord.ext import commands, tasks
 TZ_BR = ZoneInfo("America/Sao_Paulo")
 TICKET_PRICE = 50_000
 MAX_TICKETS_PER_USER_PER_RAFFLE = 1000
+BJ_TIMEOUT_SECONDS = 60
+BJ_COOLDOWN_SECONDS = 10
+BJ_FLAVOR_CHANCE = 0.005
 
 RAFFLE_TYPES: dict[str, str] = {"r": "relampago", "d": "diaria", "a": "admin"}
 RAFFLE_TYPE_ALIASES = {
@@ -109,6 +114,48 @@ class RaffleService:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS blackjack_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    bet INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    player_hand TEXT NOT NULL,
+                    dealer_hand TEXT NOT NULL,
+                    created_at_ts INTEGER NOT NULL,
+                    updated_at_ts INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS blackjack_stats (
+                    user_id TEXT PRIMARY KEY,
+                    wins INTEGER NOT NULL DEFAULT 0,
+                    losses INTEGER NOT NULL DEFAULT 0,
+                    pushes INTEGER NOT NULL DEFAULT 0,
+                    blackjacks INTEGER NOT NULL DEFAULT 0,
+                    surrenders INTEGER NOT NULL DEFAULT 0,
+                    profit_total INTEGER NOT NULL DEFAULT 0,
+                    biggest_win INTEGER NOT NULL DEFAULT 0,
+                    biggest_loss INTEGER NOT NULL DEFAULT 0,
+                    updated_at_ts INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS blackjack_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    bet INTEGER NOT NULL,
+                    result TEXT NOT NULL,
+                    profit INTEGER NOT NULL,
+                    created_at_ts INTEGER NOT NULL
+                )
+                """
+            )
 
             # defensive migrations
             self._ensure_column(conn, "raffles", "participants_total", "INTEGER NOT NULL DEFAULT 0")
@@ -120,6 +167,8 @@ class RaffleService:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_raffles_status_end ON raffles(status, end_ts)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_raffle_entries_user ON raffle_entries(user_id)")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_raffles_active_tipo ON raffles(tipo) WHERE status = 'active'")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_bj_sessions_user_status ON blackjack_sessions(user_id, status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_bj_history_user_ts ON blackjack_history(user_id, created_at_ts)")
 
             now = self.deps.now_ts()
             for tipo in RAFFLE_TITLES:
@@ -480,6 +529,354 @@ class RaffleLoop:
             self.raffle_scheduler.start()
 
 
+def _draw_card() -> str:
+    return random.choice(["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"])
+
+
+def _hand_total(hand: list[str]) -> int:
+    total = 0
+    aces = 0
+    for c in hand:
+        if c in {"J", "Q", "K"}:
+            total += 10
+        elif c == "A":
+            aces += 1
+            total += 11
+        else:
+            total += int(c)
+    while total > 21 and aces > 0:
+        total -= 10
+        aces -= 1
+    return total
+
+
+def _hand_text(hand: list[str]) -> str:
+    return " ".join(hand)
+
+
+class BlackjackService:
+    def __init__(self, deps: RaffleDeps):
+        self.deps = deps
+        self.cooldowns: dict[str, int] = {}
+
+    def _get_active_session(self, conn: sqlite3.Connection, user_id: str) -> sqlite3.Row | None:
+        return conn.execute(
+            "SELECT * FROM blackjack_sessions WHERE user_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+
+    def _ensure_stats_row(self, conn: sqlite3.Connection, user_id: str, ts: int) -> None:
+        conn.execute("INSERT OR IGNORE INTO blackjack_stats (user_id, updated_at_ts) VALUES (?, ?)", (user_id, ts))
+
+    def start_session(self, user_id: str, bet: int) -> tuple[bool, str, int | None]:
+        now = self.deps.now_ts()
+        if bet <= 0:
+            return False, "❌ A aposta deve ser maior que zero.", None
+        if self.cooldowns.get(user_id, 0) > now:
+            return False, "⏳ Aguarde alguns segundos para abrir outra mesa.", None
+
+        self.deps.get_or_create_domain(user_id)
+        with self.deps.get_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            active = self._get_active_session(conn, user_id)
+            if active:
+                conn.commit()
+                return False, "❌ Você já possui uma Mesa Imperial ativa. Use os botões da mesa atual.", None
+
+            gold = int(conn.execute("SELECT gold FROM resources WHERE user_id = ?", (user_id,)).fetchone()["gold"] or 0)
+            if bet > gold:
+                conn.commit()
+                return False, "❌ Ouro insuficiente para selar essa aposta.", None
+
+            player = [_draw_card(), _draw_card()]
+            dealer = [_draw_card(), _draw_card()]
+            conn.execute("UPDATE resources SET gold = gold - ?, updated_at_ts = ? WHERE user_id = ?", (bet, now, user_id))
+            conn.execute(
+                """
+                INSERT INTO blackjack_sessions (user_id, bet, status, player_hand, dealer_hand, created_at_ts, updated_at_ts)
+                VALUES (?, ?, 'active', ?, ?, ?, ?)
+                """,
+                (user_id, bet, json.dumps(player), json.dumps(dealer), now, now),
+            )
+            sid = int(conn.execute("SELECT last_insert_rowid() id").fetchone()["id"])
+            conn.commit()
+            return True, "📜 A aposta foi selada. 👁️ O Trono observa o seu risco.", sid
+
+    def get_session(self, user_id: str) -> sqlite3.Row | None:
+        with self.deps.get_conn() as conn:
+            return self._get_active_session(conn, user_id)
+
+    def _settle(self, conn: sqlite3.Connection, srow: sqlite3.Row, result: str) -> tuple[int, int, int]:
+        user_id = str(srow["user_id"])
+        bet = int(srow["bet"])
+        player = json.loads(str(srow["player_hand"]))
+        dealer = json.loads(str(srow["dealer_hand"]))
+        p_total = _hand_total(player)
+        d_total = _hand_total(dealer)
+
+        payout = 0
+        profit = 0
+        if result == "blackjack":
+            payout = bet + int(bet * 1.5)
+            profit = int(bet * 1.5)
+        elif result == "win":
+            payout = bet * 2
+            profit = bet
+        elif result == "push":
+            payout = bet
+            profit = 0
+        elif result == "surrender":
+            payout = bet // 2
+            profit = -(bet - payout)
+        else:
+            payout = 0
+            profit = -bet
+
+        ts = self.deps.now_ts()
+        if payout > 0:
+            conn.execute("UPDATE resources SET gold = gold + ?, updated_at_ts = ? WHERE user_id = ?", (payout, ts, user_id))
+
+        self._ensure_stats_row(conn, user_id, ts)
+        if result in {"win", "blackjack"}:
+            conn.execute("UPDATE blackjack_stats SET wins = wins + 1 WHERE user_id = ?", (user_id,))
+        elif result == "push":
+            conn.execute("UPDATE blackjack_stats SET pushes = pushes + 1 WHERE user_id = ?", (user_id,))
+        elif result == "surrender":
+            conn.execute("UPDATE blackjack_stats SET surrenders = surrenders + 1 WHERE user_id = ?", (user_id,))
+        else:
+            conn.execute("UPDATE blackjack_stats SET losses = losses + 1 WHERE user_id = ?", (user_id,))
+        if result == "blackjack":
+            conn.execute("UPDATE blackjack_stats SET blackjacks = blackjacks + 1 WHERE user_id = ?", (user_id,))
+
+        stats = conn.execute("SELECT biggest_win, biggest_loss, profit_total FROM blackjack_stats WHERE user_id = ?", (user_id,)).fetchone()
+        biggest_win = max(int(stats["biggest_win"] or 0), max(0, profit))
+        biggest_loss = min(int(stats["biggest_loss"] or 0), min(0, profit))
+        conn.execute(
+            """
+            UPDATE blackjack_stats
+            SET profit_total = profit_total + ?, biggest_win = ?, biggest_loss = ?, updated_at_ts = ?
+            WHERE user_id = ?
+            """,
+            (profit, biggest_win, biggest_loss, ts, user_id),
+        )
+        conn.execute(
+            "INSERT INTO blackjack_history (user_id, bet, result, profit, created_at_ts) VALUES (?, ?, ?, ?, ?)",
+            (user_id, bet, result, profit, ts),
+        )
+        conn.execute("UPDATE blackjack_sessions SET status = 'finished', updated_at_ts = ? WHERE id = ?", (ts, int(srow["id"])))
+        return payout, profit, bet
+
+    def player_action(self, user_id: str, action: str) -> tuple[bool, str, dict[str, object] | None]:
+        with self.deps.get_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            srow = self._get_active_session(conn, user_id)
+            if not srow:
+                conn.commit()
+                return False, "❌ Nenhuma mesa ativa encontrada para você.", None
+
+            player = json.loads(str(srow["player_hand"]))
+            dealer = json.loads(str(srow["dealer_hand"]))
+            bet = int(srow["bet"])
+            created_at = int(srow["created_at_ts"])
+            now = self.deps.now_ts()
+
+            if now - created_at > BJ_TIMEOUT_SECONDS:
+                action = "timeout"
+
+            initial_turn = len(player) == 2
+            result: str | None = None
+
+            if action == "surrender" and initial_turn:
+                result = "surrender"
+            elif action == "double" and initial_turn:
+                gold = int(conn.execute("SELECT gold FROM resources WHERE user_id = ?", (user_id,)).fetchone()["gold"] or 0)
+                if gold < bet:
+                    conn.commit()
+                    return False, "❌ Ouro insuficiente para dobrar a aposta.", None
+                conn.execute("UPDATE resources SET gold = gold - ?, updated_at_ts = ? WHERE user_id = ?", (bet, now, user_id))
+                bet *= 2
+                conn.execute("UPDATE blackjack_sessions SET bet = ?, updated_at_ts = ? WHERE id = ?", (bet, now, int(srow["id"])))
+                player.append(_draw_card())
+                conn.execute("UPDATE blackjack_sessions SET player_hand = ?, updated_at_ts = ? WHERE id = ?", (json.dumps(player), now, int(srow["id"])))
+                p_total = _hand_total(player)
+                result = "lose" if p_total > 21 else None
+                action = "stand"
+            elif action == "hit":
+                player.append(_draw_card())
+                conn.execute("UPDATE blackjack_sessions SET player_hand = ?, updated_at_ts = ? WHERE id = ?", (json.dumps(player), now, int(srow["id"])))
+                if _hand_total(player) > 21:
+                    result = "lose"
+            # stand/timeout/after double fallthrough
+
+            if action in {"stand", "timeout"} and result is None:
+                while _hand_total(dealer) < 17:
+                    dealer.append(_draw_card())
+                conn.execute("UPDATE blackjack_sessions SET dealer_hand = ?, updated_at_ts = ? WHERE id = ?", (json.dumps(dealer), now, int(srow["id"])))
+                p_total = _hand_total(player)
+                d_total = _hand_total(dealer)
+                is_natural = len(player) == 2 and p_total == 21
+                if p_total > 21:
+                    result = "lose"
+                elif d_total > 21:
+                    result = "blackjack" if is_natural else "win"
+                elif p_total > d_total:
+                    result = "blackjack" if is_natural else "win"
+                elif p_total == d_total:
+                    result = "push"
+                else:
+                    result = "lose"
+
+            if result:
+                payout, profit, final_bet = self._settle(conn, srow, result)
+                conn.commit()
+                self.cooldowns[user_id] = self.deps.now_ts() + BJ_COOLDOWN_SECONDS
+                payload = {
+                    "finished": True,
+                    "result": result,
+                    "payout": payout,
+                    "profit": profit,
+                    "bet": final_bet,
+                    "player": player,
+                    "dealer": dealer,
+                    "timeout": action == "timeout",
+                }
+                return True, "🜂 O Croupier revela a sentença.", payload
+
+            conn.commit()
+            payload = {"finished": False, "bet": bet, "player": player, "dealer": dealer}
+            return True, "Sua vez na Mesa Imperial.", payload
+
+    def stats(self, user_id: str) -> sqlite3.Row:
+        now = self.deps.now_ts()
+        with self.deps.get_conn() as conn:
+            self._ensure_stats_row(conn, user_id, now)
+            conn.commit()
+            return conn.execute("SELECT * FROM blackjack_stats WHERE user_id = ?", (user_id,)).fetchone()
+
+    def top_profit(self) -> list[sqlite3.Row]:
+        with self.deps.get_conn() as conn:
+            return conn.execute("SELECT user_id, profit_total FROM blackjack_stats ORDER BY profit_total DESC LIMIT 10").fetchall()
+
+
+def build_bj_embed(*, user: discord.abc.User, bet: int, player: list[str], dealer: list[str], finished: bool,
+                   result_line: str | None = None, profit: int | None = None) -> discord.Embed:
+    p_total = _hand_total(player)
+    shown_dealer = dealer if finished else [dealer[0], "?"]
+    d_total = _hand_total(dealer) if finished else "?"
+    embed = discord.Embed(title="🎲 NEXAR | Mesa Imperial — Blackjack", color=discord.Color.dark_gold())
+    embed.add_field(name="Aposta Selada", value=f"{bet:,} ouro".replace(",", "."), inline=False)
+    embed.add_field(name="Croupier do Trono", value=f"{_hand_text(shown_dealer)} (Total: {d_total})", inline=False)
+    embed.add_field(name="Jogador", value=f"{_hand_text(player)} (Total: {p_total})", inline=False)
+    embed.add_field(name="Estado", value="Sentença do Croupier" if finished else "Sua vez", inline=False)
+    if result_line:
+        delta = f"\nΔ Ouro: {profit:+,}".replace(",", ".") if profit is not None else ""
+        embed.add_field(name="Resultado", value=f"{result_line}{delta}", inline=False)
+    return embed
+
+
+class BlackjackView(discord.ui.View):
+    def __init__(self, *, owner_id: int, service: BlackjackService, bot: commands.Bot):
+        super().__init__(timeout=BJ_TIMEOUT_SECONDS)
+        self.owner_id = owner_id
+        self.service = service
+        self.bot = bot
+        self.message: discord.Message | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("❌ Apenas quem abriu a mesa pode jogar nela.", ephemeral=True)
+            return False
+        return True
+
+    async def _run_action(self, interaction: discord.Interaction, action: str) -> None:
+        ok, msg, data = self.service.player_action(str(interaction.user.id), action)
+        if not ok or not data:
+            await interaction.response.send_message(msg, ephemeral=True)
+            return
+
+        finished = bool(data["finished"])
+        if finished:
+            self.disable_all_items()
+            flavor = ""
+            if random.random() < BJ_FLAVOR_CHANCE:
+                flavor = "\n📜 Fragmento: \"A moeda não tem lado… só preço.\""
+            result_map = {
+                "blackjack": "🃏 Blackjack Imperial!",
+                "win": "✅ Vitória.",
+                "push": "⚖️ Empate.",
+                "lose": "❌ Derrota.",
+                "surrender": "🏳️ Rendição aceita.",
+            }
+            line = result_map.get(str(data["result"]), "Fim da rodada.") + flavor
+            embed = build_bj_embed(
+                user=interaction.user,
+                bet=int(data["bet"]),
+                player=data["player"],
+                dealer=data["dealer"],
+                finished=True,
+                result_line=line,
+                profit=int(data["profit"]),
+            )
+            await interaction.response.edit_message(embed=embed, view=self)
+            return
+
+        embed = build_bj_embed(
+            user=interaction.user,
+            bet=int(data["bet"]),
+            player=data["player"],
+            dealer=data["dealer"],
+            finished=False,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="🂡 Puxar", style=discord.ButtonStyle.success)
+    async def hit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._run_action(interaction, "hit")
+
+    @discord.ui.button(label="🛡️ Parar", style=discord.ButtonStyle.primary)
+    async def stand(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._run_action(interaction, "stand")
+
+    @discord.ui.button(label="⚡ Dobrar", style=discord.ButtonStyle.secondary)
+    async def double(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._run_action(interaction, "double")
+
+    @discord.ui.button(label="🏳️ Render-se", style=discord.ButtonStyle.danger)
+    async def surrender(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._run_action(interaction, "surrender")
+
+    async def on_timeout(self) -> None:
+        ok, _msg, data = self.service.player_action(str(self.owner_id), "timeout")
+        self.disable_all_items()
+        if not self.message:
+            return
+        if ok and data and data.get("finished"):
+            user = self.bot.get_user(self.owner_id)
+            if user is None:
+                try:
+                    user = await self.bot.fetch_user(self.owner_id)
+                except Exception:
+                    return
+            embed = build_bj_embed(
+                user=user,
+                bet=int(data["bet"]),
+                player=data["player"],
+                dealer=data["dealer"],
+                finished=True,
+                result_line="⏳ Tempo esgotado: a mesa foi encerrada por stand automático.",
+                profit=int(data["profit"]),
+            )
+            try:
+                await self.message.edit(embed=embed, view=self)
+            except Exception:
+                return
+        else:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                return
+
+
 def setup_bets(
     *,
     bot: commands.Bot,
@@ -491,6 +888,7 @@ def setup_bets(
 ) -> tuple[RaffleService, RaffleLoop]:
     del update_player_state
     service = RaffleService(RaffleDeps(get_conn=get_conn, get_or_create_domain=get_or_create_domain, now_ts=now_ts, logger=logger))
+    bj_service = BlackjackService(RaffleDeps(get_conn=get_conn, get_or_create_domain=get_or_create_domain, now_ts=now_ts, logger=logger))
     service.init_db()
     loop = RaffleLoop(bot=bot, service=service, logger=logger)
 
@@ -541,5 +939,58 @@ def setup_bets(
     @bot.command(name="rifas")
     async def rifas(ctx: commands.Context) -> None:
         await rifa(ctx)
+
+    @bot.command(name="bj")
+    async def bj(ctx: commands.Context, aposta: str | None = None) -> None:
+        if aposta is None:
+            await ctx.send(
+                "🎲 Mesa Imperial — Blackjack\n"
+                "Uso: `!bj <aposta>`\n"
+                "Botões: 🂡 Puxar • 🛡️ Parar • ⚡ Dobrar • 🏳️ Render-se\n"
+                "Payouts: Blackjack +1.5x lucro | Vitória +1x | Empate 0 | Derrota -1x | Render-se -0.5x"
+            )
+            return
+        if not aposta.isdigit():
+            await ctx.send("❌ A aposta deve ser um inteiro positivo (sem decimal).")
+            return
+        bet = int(aposta)
+        ok, msg, sid = bj_service.start_session(str(ctx.author.id), bet)
+        if not ok or sid is None:
+            await ctx.send(f"<@{ctx.author.id}> {msg}")
+            return
+        srow = bj_service.get_session(str(ctx.author.id))
+        if not srow:
+            await ctx.send("❌ Não foi possível abrir a mesa agora.")
+            return
+        player = json.loads(str(srow["player_hand"]))
+        dealer = json.loads(str(srow["dealer_hand"]))
+        embed = build_bj_embed(user=ctx.author, bet=int(srow["bet"]), player=player, dealer=dealer, finished=False)
+        view = BlackjackView(owner_id=ctx.author.id, service=bj_service, bot=bot)
+        msg_obj = await ctx.send(content=f"<@{ctx.author.id}> {msg}", embed=embed, view=view)
+        view.message = msg_obj
+
+    @bot.command(name="bjstats")
+    async def bjstats(ctx: commands.Context) -> None:
+        row = bj_service.stats(str(ctx.author.id))
+        embed = discord.Embed(title="📊 NEXAR | Estatísticas da Mesa Imperial", color=discord.Color.blurple())
+        embed.add_field(name="Vitórias", value=str(int(row["wins"] or 0)), inline=True)
+        embed.add_field(name="Derrotas", value=str(int(row["losses"] or 0)), inline=True)
+        embed.add_field(name="Empates", value=str(int(row["pushes"] or 0)), inline=True)
+        embed.add_field(name="Blackjacks", value=str(int(row["blackjacks"] or 0)), inline=True)
+        embed.add_field(name="Rendições", value=str(int(row["surrenders"] or 0)), inline=True)
+        embed.add_field(name="Lucro total", value=f"{int(row['profit_total'] or 0):,} ouro".replace(",", "."), inline=False)
+        embed.add_field(name="Maior vitória", value=f"{int(row['biggest_win'] or 0):,}".replace(",", "."), inline=True)
+        embed.add_field(name="Maior derrota", value=f"{int(row['biggest_loss'] or 0):,}".replace(",", "."), inline=True)
+        await ctx.send(content=f"<@{ctx.author.id}>", embed=embed)
+
+    @bot.command(name="bjrank")
+    async def bjrank(ctx: commands.Context) -> None:
+        rows = bj_service.top_profit()
+        if not rows:
+            await ctx.send("📉 Nenhum dado de Blackjack ainda.")
+            return
+        lines = [f"{i}. <@{r['user_id']}> — {int(r['profit_total']):,}".replace(",", ".") for i, r in enumerate(rows, start=1)]
+        embed = discord.Embed(title="🏛️ NEXAR | Ranking Blackjack (Lucro Total)", description="\n".join(lines), color=discord.Color.dark_teal())
+        await ctx.send(embed=embed)
 
     return service, loop
