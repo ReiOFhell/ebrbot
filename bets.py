@@ -825,17 +825,20 @@ class BlackjackView(discord.ui.View):
         return True
 
     async def _run_action(self, interaction: discord.Interaction, action: str) -> None:
+        if not interaction.response.is_done():
+            # ACK imediato evita "Esta interação falhou" quando a jogada demora >3s.
+            await interaction.response.defer(thinking=False)
+
         async def _safe_edit(*, embed: discord.Embed, view: discord.ui.View | None = None) -> None:
-            if interaction.response.is_done():
+            try:
                 await interaction.edit_original_response(embed=embed, view=view)
-            else:
-                await interaction.response.edit_message(embed=embed, view=view)
+            except Exception as exc:
+                self.service.deps.logger.exception("Falha ao atualizar embed do blackjack", exc_info=exc)
+                self.service.deps.log_command_error(str(interaction.user.id), "bj_interaction", exc)
+                raise
 
         async def _safe_ephemeral(text: str) -> None:
-            if interaction.response.is_done():
-                await interaction.followup.send(text, ephemeral=True)
-            else:
-                await interaction.response.send_message(text, ephemeral=True)
+            await interaction.followup.send(text, ephemeral=True)
 
         try:
             ok, msg, data = self.service.player_action(str(interaction.user.id), action)
@@ -877,7 +880,10 @@ class BlackjackView(discord.ui.View):
                 payout=int(data["payout"]),
                 status_line="Rodada encerrada",
             )
-            await _safe_edit(embed=embed, view=self)
+            try:
+                await _safe_edit(embed=embed, view=self)
+            except Exception:
+                await _safe_ephemeral("❌ Não consegui atualizar a mesa com o resultado final. Use `!bjstats` para confirmar o resultado.")
             return
 
         last_pull = None
@@ -895,7 +901,10 @@ class BlackjackView(discord.ui.View):
             last_pull=last_pull,
             status_line="Sua vez",
         )
-        await _safe_edit(embed=embed, view=self)
+        try:
+            await _safe_edit(embed=embed, view=self)
+        except Exception:
+            await _safe_ephemeral("❌ Não consegui atualizar a mesa agora. Tente clicar novamente.")
 
     @discord.ui.button(label="🂡 Puxar", style=discord.ButtonStyle.success)
     async def hit(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
