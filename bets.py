@@ -22,19 +22,16 @@ BJ_TIMEOUT_SECONDS = 60
 BJ_COOLDOWN_SECONDS = 10
 BJ_FLAVOR_CHANCE = 0.005
 
-RAFFLE_TYPES: dict[str, str] = {"r": "relampago", "d": "diaria", "a": "admin"}
+RAFFLE_TYPES: dict[str, str] = {"r": "relampago", "d": "diaria"}
 RAFFLE_TYPE_ALIASES = {
     "r": "relampago",
     "relampago": "relampago",
     "d": "diaria",
     "diaria": "diaria",
-    "a": "admin",
-    "admin": "admin",
 }
 RAFFLE_TITLES = {
     "relampago": "🎲 NEXAR | Rifa Relâmpago",
     "diaria": "🎲 NEXAR | Rifa Diária",
-    "admin": "🛠️ NEXAR | Rifa Admin (Teste)",
 }
 
 
@@ -189,8 +186,6 @@ class RaffleService:
         now_br = datetime.fromtimestamp(now_ts, tz=TZ_BR)
         if tipo == "relampago":
             return int((now_br + timedelta(minutes=25)).timestamp())
-        if tipo == "admin":
-            return int((now_br + timedelta(minutes=1)).timestamp())
         nxt = (now_br + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         return int(nxt.timestamp())
 
@@ -230,8 +225,6 @@ class RaffleService:
         tipo = self._normalize_tipo(tipo_raw)
         if not tipo:
             return False, "❌ Tipo inválido. Use r, d ou a/admin."
-        if tipo == "admin" and not is_admin:
-            return False, "❌ A rifa admin é exclusiva para administradores."
         if quantity <= 0:
             return False, "❌ Quantidade inválida. Use inteiro > 0."
 
@@ -345,7 +338,7 @@ class RaffleService:
         with self.deps.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
-                "UPDATE raffles SET status = 'closed', updated_at_ts = ? WHERE status = 'active' AND tipo NOT IN ('relampago','diaria','admin')",
+                "UPDATE raffles SET status = 'closed', updated_at_ts = ? WHERE status = 'active' AND tipo NOT IN ('relampago','diaria')",
                 (now,),
             )
             expired = conn.execute("SELECT * FROM raffles WHERE status = 'active' AND end_ts <= ? ORDER BY end_ts ASC", (now,)).fetchall()
@@ -810,6 +803,19 @@ def build_bj_embed(*, user: discord.abc.User, bet: int, player: list[str], deale
     return embed
 
 
+def _bj_result_banner(result: str, player: list[str], dealer: list[str], flavor: str = "") -> str:
+    line_map = {
+        "blackjack": "🟣 BLACKJACK\n🃏 Blackjack Imperial!",
+        "win": "🟢 VITÓRIA\n✅ Vitória.",
+        "push": "🟡 EMPATE\n⚖️ Empate.",
+        "lose": "⚫ ESTOUROU\n❌ Derrota." if _hand_total(player) > 21 else "🔴 DERROTA\n❌ Derrota.",
+        "surrender": "🔴 DERROTA\n🏳️ Rendição aceita.",
+    }
+    if result == "win" and _hand_total(dealer) > 21:
+        line_map["win"] = "🔵 CROUPIER ESTOUROU\n✅ Vitória."
+    return line_map.get(result, "Fim da rodada.") + flavor
+
+
 class BlackjackView(discord.ui.View):
     def __init__(self, *, owner_id: int, service: BlackjackService, bot: commands.Bot):
         super().__init__(timeout=BJ_TIMEOUT_SECONDS)
@@ -857,18 +863,7 @@ class BlackjackView(discord.ui.View):
             flavor = ""
             if random.random() < BJ_FLAVOR_CHANCE:
                 flavor = "\n📜 Fragmento: \"A moeda não tem lado… só preço.\""
-            result_map = {
-                "blackjack": "🟣 BLACKJACK\n🃏 Blackjack Imperial!",
-                "win": "🟢 VITÓRIA\n✅ Vitória.",
-                "push": "🟡 EMPATE\n⚖️ Empate.",
-                "lose": "⚫ ESTOUROU\n❌ Derrota." if _hand_total(data["player"]) > 21 else "🔴 DERROTA\n❌ Derrota.",
-                "surrender": "🏳️ Rendição aceita.",
-            }
-            if str(data["result"]) == "win" and _hand_total(data["dealer"]) > 21:
-                result_map["win"] = "🔵 CROUPIER ESTOUROU\n✅ Vitória."
-            if str(data["result"]) == "surrender":
-                result_map["surrender"] = "🔴 DERROTA\n🏳️ Rendição aceita."
-            line = result_map.get(str(data["result"]), "Fim da rodada.") + flavor
+            line = _bj_result_banner(str(data["result"]), data["player"], data["dealer"], flavor=flavor)
             embed = build_bj_embed(
                 user=interaction.user,
                 bet=int(data["bet"]),
@@ -940,7 +935,10 @@ class BlackjackView(discord.ui.View):
                 player=data["player"],
                 dealer=data["dealer"],
                 finished=True,
-                result_line="⏳ Tempo esgotado: a mesa foi encerrada por stand automático.",
+                result_line=(
+                    "⏳ O Trono não espera. Rodada encerrada por tempo.\n"
+                    + _bj_result_banner(str(data["result"]), data["player"], data["dealer"])
+                ),
                 profit=int(data["profit"]),
                 payout=int(data["payout"]),
                 status_line="Rodada encerrada",
@@ -998,7 +996,7 @@ def setup_bets(
         first = args[0].lower()
         if first in {"b", "buy"}:
             if len(args) < 3:
-                await ctx.send("Uso: `!rifa b <r|d|a> <quantidade>` ou `!rifa buy <r|d|admin> <quantidade>`")
+                await ctx.send("Uso: `!rifa b <r|d> <quantidade>` ou `!rifa buy <r|d> <quantidade>`")
                 return
             tipo_raw = args[1]
             try:
@@ -1012,12 +1010,9 @@ def setup_bets(
 
         data = service.get_panel_data(tipo_raw=first, user_id=uid, guild_id=gid, channel_id=cid)
         if not data:
-            await ctx.send("❌ Uso: `!rifa`, `!rifa r`, `!rifa d`, `!rifa a`, `!rifa b <tipo> <qtd>`, `!rifa buy <tipo> <qtd>`")
+            await ctx.send("❌ Uso: `!rifa`, `!rifa r`, `!rifa d`, `!rifa b <tipo> <qtd>`, `!rifa buy <tipo> <qtd>`")
             return
-        if data["tipo"] == "admin" and not is_admin:
-            await ctx.send("❌ A rifa admin é exclusiva para administradores.")
-            return
-        alias = "r" if data["tipo"] == "relampago" else ("d" if data["tipo"] == "diaria" else "a")
+        alias = "r" if data["tipo"] == "relampago" else "d"
         await ctx.send(content=f"<@{ctx.author.id}>", embed=build_raffle_embed(data, tipo_alias=alias))
 
     @bot.command(name="rifas")
