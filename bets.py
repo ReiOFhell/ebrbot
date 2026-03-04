@@ -44,6 +44,7 @@ class RaffleDeps:
     get_or_create_domain: Callable[[str], sqlite3.Row]
     now_ts: Callable[[], int]
     logger: Logger
+    log_command_error: Callable[[str | None, str, Exception], None]
 
 
 class RaffleService:
@@ -771,6 +772,19 @@ class BlackjackService:
         with self.deps.get_conn() as conn:
             return conn.execute("SELECT user_id, profit_total FROM blackjack_stats ORDER BY profit_total DESC LIMIT 10").fetchall()
 
+    def diagnostics_snapshot(self) -> dict[str, int]:
+        now = self.deps.now_ts()
+        with self.deps.get_conn() as conn:
+            active = int(conn.execute("SELECT COUNT(*) c FROM blackjack_sessions WHERE status = 'active'").fetchone()["c"])
+            stale = int(
+                conn.execute(
+                    "SELECT COUNT(*) c FROM blackjack_sessions WHERE status = 'active' AND updated_at_ts <= ?",
+                    (now - BJ_TIMEOUT_SECONDS,),
+                ).fetchone()["c"]
+            )
+            total = int(conn.execute("SELECT COUNT(*) c FROM blackjack_sessions").fetchone()["c"])
+        return {"active": active, "stale_active": stale, "total_sessions": total}
+
 
 def build_bj_embed(*, user: discord.abc.User, bet: int, player: list[str], dealer: list[str], finished: bool,
                    result_line: str | None = None, profit: int | None = None, status_line: str | None = None,
@@ -823,7 +837,13 @@ class BlackjackView(discord.ui.View):
             else:
                 await interaction.response.send_message(text, ephemeral=True)
 
-        ok, msg, data = self.service.player_action(str(interaction.user.id), action)
+        try:
+            ok, msg, data = self.service.player_action(str(interaction.user.id), action)
+        except Exception as exc:
+            self.service.deps.logger.exception("Erro na interação do blackjack", exc_info=exc)
+            self.service.deps.log_command_error(str(interaction.user.id), "bj_interaction", exc)
+            await _safe_ephemeral("❌ Falha interna ao processar sua jogada. Tente novamente.")
+            return
         if not ok or not data:
             await _safe_ephemeral(msg)
             return
@@ -935,10 +955,15 @@ def setup_bets(
     update_player_state: Callable[..., None],
     now_ts: Callable[[], int],
     logger: Logger,
+    log_command_error: Callable[[str | None, str, Exception], None],
 ) -> tuple[RaffleService, RaffleLoop]:
     del update_player_state
-    service = RaffleService(RaffleDeps(get_conn=get_conn, get_or_create_domain=get_or_create_domain, now_ts=now_ts, logger=logger))
-    bj_service = BlackjackService(RaffleDeps(get_conn=get_conn, get_or_create_domain=get_or_create_domain, now_ts=now_ts, logger=logger))
+    service = RaffleService(
+        RaffleDeps(get_conn=get_conn, get_or_create_domain=get_or_create_domain, now_ts=now_ts, logger=logger, log_command_error=log_command_error)
+    )
+    bj_service = BlackjackService(
+        RaffleDeps(get_conn=get_conn, get_or_create_domain=get_or_create_domain, now_ts=now_ts, logger=logger, log_command_error=log_command_error)
+    )
     service.init_db()
     loop = RaffleLoop(bot=bot, service=service, logger=logger)
 

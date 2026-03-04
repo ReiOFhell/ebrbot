@@ -1846,8 +1846,15 @@ async def diagnostico(ctx: commands.Context) -> None:
         for table in [
             "domains", "domain_buildings", "resources", "army", "generals", "strategists", "operations",
             "operation_runs", "items", "inventories", "season_state", "season_scores", "panel_events", "command_errors",
+            "blackjack_sessions", "blackjack_stats", "blackjack_history",
         ]:
             counts[table] = conn.execute(f"SELECT COUNT(*) c FROM {table}").fetchone()["c"]
+
+        bj_active = conn.execute("SELECT COUNT(*) c FROM blackjack_sessions WHERE status = 'active'").fetchone()["c"]
+        bj_stale = conn.execute(
+            "SELECT COUNT(*) c FROM blackjack_sessions WHERE status = 'active' AND updated_at_ts <= ?",
+            (now_ts() - 60,),
+        ).fetchone()["c"]
 
         recent_errors = conn.execute(
             """
@@ -1858,15 +1865,31 @@ async def diagnostico(ctx: commands.Context) -> None:
             """
         ).fetchall()
 
+        recent_bj_errors = conn.execute(
+            """
+            SELECT command_name, error_type, error_text, created_at_ts, user_id
+            FROM command_errors
+            WHERE command_name IN ('bj', 'bj_interaction')
+            ORDER BY id DESC
+            LIMIT 10
+            """
+        ).fetchall()
+
     lines = [f"{k}: {v}" for k, v in counts.items()]
     err_lines = [
         f"• {r['command_name']} | {r['error_type']} | uid={r['user_id'] or '-'} | {r['error_text'][:120]}"
         for r in recent_errors
     ] or ["• sem erros registrados"]
+    bj_err_lines = [
+        f"• {r['command_name']} | {r['error_type']} | uid={r['user_id'] or '-'} | {r['error_text'][:120]}"
+        for r in recent_bj_errors
+    ] or ["• sem erros de blackjack registrados"]
 
     await ctx.send(
         f"Diagnóstico Fase 1\nDB: `{DB_PATH}`\n" + "\n".join(lines) +
-        "\n\nÚltimos erros de comando:\n" + "\n".join(err_lines)
+        f"\n\nBlackjack ativo: {bj_active} | Ativo potencialmente travado (>60s): {bj_stale}" +
+        "\n\nÚltimos erros de comando:\n" + "\n".join(err_lines) +
+        "\n\nÚltimos erros de blackjack:\n" + "\n".join(bj_err_lines)
     )
 
 
@@ -2075,6 +2098,7 @@ def main() -> None:
         update_player_state=update_player_state,
         now_ts=now_ts,
         logger=logger,
+        log_command_error=log_command_error,
     )
     try:
         token = resolve_token()
