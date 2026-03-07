@@ -1,219 +1,225 @@
 # Decisão Oficial de Design — NEXAR
 
-Este documento define a nova direção jogável oficial do NEXAR. A partir desta decisão, o bot deixa de operar como um conjunto disperso de sistemas e passa a operar como um **domínio vivo orientado a retenção no Discord**.
+> **Esta é a nova direção oficial do NEXAR.**
+> O produto deixa de ser “vários sistemas soltos” e passa a ser um **domínio vivo**, com leitura rápida, ação imediata e retenção diária dentro do Discord.
 
 ---
 
-## 1) NOVO `!dominio` FINAL (Hub Central)
+## 1) NOVO `!dominio` FINAL
 
-### Estrutura final do painel principal
-O `!dominio` passa a ter **4 blocos fixos** e **1 trilho de ação**:
+O `!dominio` é o **hub central absoluto** do jogo.
+Ele deve responder, em segundos, três perguntas:
+1. **Onde estou agora?**
+2. **O que posso fazer agora?**
+3. **Qual é meu próximo passo?**
 
-1. **Economia (Agora)**
-   - Ouro atual
-   - Ouro resgatável
-   - Custo da próxima melhoria recomendada
-   - Indicador curto: `Pronto para resgate` / `Juntar para upgrade`
+### Estrutura final obrigatória do painel principal
 
-2. **Militar (Força em curso)**
-   - Tropas
-   - Poder total
-   - Estado de treino (pronto/em ciclo)
-   - Estado do General e Estrategista (rank e progresso)
+### A. Economia (estado atual)
+- Ouro atual
+- Ouro resgatável agora
+- Custo do próximo upgrade recomendado
+- Status curto: `Pronto para resgate` / `Juntar ouro` / `Upgrade disponível`
 
-3. **Operações (Risco do momento)**
-   - 1 operação recomendada para o estado atual
-   - 1 operação bloqueada com motivo explícito (ex.: “Falta Casernas T4”)
-   - Resultado da última operação (mini-resumo)
+### B. Militar (força em movimento)
+- Tropas atuais
+- Poder total
+- Estado do treino (pronto/em ciclo)
+- General e Estrategista (rank + progresso)
 
-4. **Arquivo (Valor acumulado)**
-   - Total de descobertas únicas
-   - Último achado relevante
-   - Progresso de coleção (ex.: `Set Basalto 2/5`)
+### C. Operações (risco e avanço)
+- Operação recomendada para o estado atual
+- Operação bloqueada + motivo objetivo (ex.: falta tier/composição)
+- Último resultado operacional (resumo de 1 linha)
 
-5. **Próximo Passo (CTA obrigatório)**
-   - Linha única e direta, sempre presente:
-     - Ex.: `Próximo passo: Resgatar e elevar Celeiros para T4.`
-     - Ex.: `Próximo passo: Executar Estrada das Sete Cinzas.`
+### D. Arquivo (valor acumulado)
+- Descobertas únicas
+- Último achado relevante
+- Progresso de coleção (sets/fragmentos)
+
+### E. Próximo Passo (CTA obrigatório)
+- Uma linha única, sempre presente, orientando ação imediata.
+- Exemplo: `Próximo passo: Resgatar ouro e elevar Casernas para T4.`
 
 ### O que sai do foco principal
-- Detalhes extensos, listas longas e histórico completo saem da tela principal.
-- Informações técnicas de diagnóstico e administração nunca aparecem no painel normal.
+- Texto longo
+- Histórico completo
+- Listas extensas
+- Informação técnica/admin
 
 ### O que vira submenu
-- **Construções**: upgrade detalhado por prédio.
-- **Militar**: evolução detalhada de General/Estrategista + doutrina.
-- **Operações**: lista completa, requisitos e execução.
-- **Arquivo**: inventário completo e detalhes de coleção.
+- Construções
+- Militar (detalhado)
+- Operações (lista completa)
+- Arquivo (`!cronicas`) detalhado
 
-### Função psicológica oficial do painel
-O `!dominio` deve, em uma única leitura:
-- **Informar**: “onde eu estou agora”.
-- **Provocar ação**: “o que está pronto para clique”.
-- **Despertar curiosidade**: “o que apareceu de novo”.
-- **Guiar progresso**: “qual é meu próximo passo imediato”.
+### Função psicológica oficial
+O painel deve:
+- **informar** com clareza,
+- **provocar ação** por clique,
+- **despertar curiosidade**,
+- **apontar o próximo passo** sem dúvida.
 
 ---
 
-## 2) SISTEMA DE OCORRÊNCIAS (Versão Oficial)
+## 2) SISTEMA DE OCORRÊNCIAS (VERSÃO OFICIAL)
 
-Ocorrências passam a ser o motor vivo do NEXAR. Elas são curtas, acionáveis e temporais.
+Ocorrências são o **coração vivo** do NEXAR.
+São o principal gatilho de retorno e surpresa.
 
 ### Tipos oficiais
 1. **Rumor**
-   - Natureza: informativo/tático.
-   - Ex.: bônus contextual, aviso de risco, pista de operação.
-   - Impacto: pequeno, orienta decisão.
+   - pista/informação tática
+   - baixo impacto, alta orientação
 
 2. **Oportunidade**
-   - Natureza: janela de ganho.
-   - Ex.: bônus temporário em ouro, chance extra de achado, custo reduzido de ação.
-   - Impacto: médio, cria urgência de retorno.
+   - janela temporária de vantagem
+   - impacto médio (ganho, custo reduzido, bônus situacional)
 
 3. **Presságio**
-   - Natureza: evento raro com consequência de alto valor narrativo.
-   - Ex.: rota especial, chance de relíquia superior, risco elevado com retorno alto.
-   - Impacto: alto, memorável.
+   - evento raro de alto risco/alto valor
+   - impacto alto e memorável
 
 ### Como aparecem
-- Cada jogador mantém **até 3 ocorrências ativas** simultâneas.
-- Regra de prioridade visual no painel:
-  1) Presságio
-  2) Oportunidade
-  3) Rumor
-- Ocorrências têm validade (TTL) e expiram automaticamente.
+- Máximo de **3 ocorrências ativas** por jogador.
+- Prioridade visual fixa: **Presságio > Oportunidade > Rumor**.
+- Todas com tempo de validade (TTL).
 
-### Como são exibidas no `!dominio`
-- Bloco “Ocorrências” com formato padrão:
-  - Ícone + tipo + título curto
-  - Tempo restante
-  - Ação sugerida (`Ir para Operações`, `Forjar agora`, etc.)
+### Como aparecem no painel
+Bloco “Ocorrências” com:
+- tipo + título curto,
+- tempo restante,
+- ação sugerida (`ir para Operações`, `forjar`, `coletar agora`).
 
-### Interação do jogador
-- Cada ocorrência deve ter apenas dois estados: **ignorada** ou **resolvida**.
-- Resolução sempre via ação existente (não criar comando novo obrigatório).
-- Resultado curto após resolução:
-  - ganho/perda,
-  - impacto,
-  - próximo passo.
+### Como o jogador interage
+Cada ocorrência tem apenas 2 destinos:
+- **Resolvida** (via ação já existente),
+- **Ignorada** (expira).
 
-### Regra de retenção sem bagunça
-- No máximo 1 nova ocorrência relevante por janela curta (anti-spam).
-- Ocorrência repetida não vira texto duplicado: soma frequência em histórico resumido.
-- Objetivo: o jogador pensar “vou abrir o NEXAR para ver se algo apareceu”.
+Após resolver, retorno curto obrigatório:
+- impacto,
+- ganho/perda,
+- próximo passo.
+
+### Regra de retenção
+- Não virar spam: no máximo 1 ocorrência nova relevante por janela curta.
+- Repetições não poluem: agregadas por frequência em histórico resumido.
+- Resultado esperado: jogador abrir o NEXAR pensando **“o que surgiu agora?”**.
 
 ---
 
 ## 3) NOVO `!cronicas` / ARQUIVO FINAL
 
-O Arquivo passa a ser coleção viva e legível, não dump de texto.
+O Arquivo deixa de ser dump textual.
+Passa a ser **coleção, descoberta e legado**.
 
-### Modelo oficial de organização
+### Modelo oficial
 
-#### A) Resumo (primeira visão)
-- Totais por categoria:
+### Visão 1 — Resumo
+- Total por categoria:
   - Fragmentos
   - Relíquias
   - Entidades
-- Progresso por coleção/set
-- Últimas 3 descobertas relevantes
+- Progresso de sets
+- Últimos 3 achados relevantes
 
-#### B) Detalhe (segunda visão)
-- Lista paginada por categoria/raridade
-- Cada item mostra:
+### Visão 2 — Detalhe
+- Paginação por categoria e raridade
+- Cada registro com:
   - nome,
   - raridade,
   - quantidade,
-  - última data de aquisição,
-  - tag de origem (`forja`, `operação`, `ocorrência`)
+  - última aquisição,
+  - origem (`forja`, `operação`, `ocorrência`)
 
-### Regra de empilhamento
-- Itens repetidos **empilham por chave** (`item_key`) com contador.
-- Histórico separado guarda eventos de aquisição, não duplicata no inventário principal.
+### Regra de repetição
+- Repetidos **empilham por chave de item**.
+- Histórico de aquisição fica separado do inventário principal.
 
-### Categorias e raridade (visual oficial)
-- Categorias fixas: `Fragmento`, `Relíquia`, `Entidade`.
-- Raridade com selo visual curto (ex.: `R`, `SR`, `SSR`, `SSS+`, `99999`).
-- Quantidade sempre visível ao lado do nome (`x3`, `x12`).
+### Raridade e leitura
+- Selos de raridade visuais e curtos (`R`, `SR`, `SSR`, `SSS+`, `99999`).
+- Quantidade sempre visível (`x2`, `x15`).
 
-### Forja no Arquivo (integração oficial)
-- Forja entra como **fonte de descoberta** e **progressão de coleção**.
-- Não é sistema isolado: cada forja alimenta diretamente o Arquivo e o progresso de sets.
+### Papel da Forja
+- Forja é fonte oficial de descoberta e progressão de coleção.
+- Forja não é sistema paralelo: ela alimenta diretamente o Arquivo.
 
-### Resultado desejado
+### Resultado esperado
 `!cronicas` deve transmitir:
-- coleção com valor,
-- descoberta com memória,
-- legado com status.
+- status,
+- valor acumulado,
+- memória de conquista,
+- desejo de completar coleção.
 
 ---
 
-## 4) ROADMAP OFICIAL DE REFORMA (3 Etapas)
+## 4) ROADMAP OFICIAL DE REFORMA
 
-## Etapa 1 — Clareza imediata do núcleo (impacto em 1 semana)
+## Etapa 1 — Clareza imediata do núcleo
 ### O que muda
-- Reformulação do `!dominio` com blocos fixos + “Próximo Passo”.
-- Remoção de ruído textual da tela principal.
-- Submenus organizados por área (Construções, Militar, Operações, Arquivo).
+- `!dominio` vira hub final com blocos fixos + CTA.
+- redução de ruído textual.
 
 ### O que permanece
-- Economia, tropas, operações, forja e ranking continuam existindo.
+- economia, militar, operações e forja atuais.
 
 ### O que é reaproveitado
-- Dados atuais de ouro, poder, estruturas e operações.
-- UI de botões já existente.
+- dados persistidos existentes,
+- subviews já implementadas.
 
 ### O que é adicionado
-- Camada de recomendação de próximo passo (determinística).
+- motor de “próximo passo” determinístico.
 
-### Melhoria imediata para o jogador
-- Entendimento em segundos do que fazer agora.
+### Ganho imediato ao jogador
+- compreensão instantânea do que fazer agora.
 
 ---
 
-## Etapa 2 — Coração vivo via Ocorrências (impacto em retenção)
+## Etapa 2 — Ocorrências como motor de vida
 ### O que muda
-- Introdução oficial do sistema Rumor/Oportunidade/Presságio.
-- Bloco de ocorrências passa a morar no `!dominio`.
+- entrada oficial de Rumor/Oportunidade/Presságio no fluxo diário.
 
 ### O que permanece
-- Loop base (resgatar, evoluir, treinar, operar) continua igual.
+- loop base de progresso por ações existentes.
 
 ### O que é reaproveitado
-- Operações, forja e recompensas existentes como destinos das ocorrências.
+- operações e forja como destino natural das ocorrências.
 
 ### O que é adicionado
-- Geração temporal controlada de ocorrências + TTL + resolução.
+- geração temporal controlada + TTL + resolução simples.
 
-### Melhoria imediata para o jogador
-- Motivo real para voltar várias vezes ao dia.
+### Ganho imediato ao jogador
+- motivo real para voltar várias vezes ao dia.
 
 ---
 
-## Etapa 3 — Arquivo como status e legado (impacto em longo prazo)
+## Etapa 3 — Arquivo como status competitivo
 ### O que muda
-- `!cronicas` vira coleção com resumo + detalhe paginado.
-- Empilhamento de repetidos e progressão de sets.
+- `!cronicas` vira coleção estruturada (resumo + detalhe + progresso).
 
 ### O que permanece
-- Achados já existentes e lógica de raridade.
+- raridades e achados já existentes.
 
 ### O que é reaproveitado
-- Histórico atual de itens/pergaminhos/relíquias.
+- inventário e histórico atuais.
 
 ### O que é adicionado
-- Camada de apresentação orientada a valor (quantidade, raridade, origem, progresso).
+- empilhamento oficial,
+- visão por categoria,
+- progressão de set com leitura clara.
 
-### Melhoria imediata para o jogador
-- Sensação de legado contínuo e status acumulado.
+### Ganho imediato ao jogador
+- sensação de legado e status contínuo.
 
 ---
 
 ## Declaração final
 
 **Esta é a nova direção oficial do NEXAR**:
-- menos fricção,
-- mais clareza por clique,
-- mundo vivo por ocorrências,
-- coleção com significado,
-- progresso que o jogador sente toda vez que abre o painel.
+- progresso claro,
+- risco real,
+- curiosidade constante,
+- oportunidade viva,
+- status reconhecível.
+
+O NEXAR passa a ser um domínio que **se move mesmo quando o jogador não está olhando** — e que recompensa quem volta, decide e executa.
