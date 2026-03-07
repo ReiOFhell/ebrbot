@@ -70,6 +70,13 @@ PAY_FEE_PCT = 0.02
 RESET_GLOBAL_CONFIRM_WINDOW = 30
 RESET_GLOBAL_PENDING: dict[str, int] = {}
 
+OCCURRENCE_MAX_ACTIVE = 3
+OCCURRENCE_TTL_SECONDS = {
+    "rumor": 45 * 60,
+    "oportunidade": 35 * 60,
+    "pressagio": 25 * 60,
+}
+
 
 def now_ts() -> int:
     return int(time.time())
@@ -329,6 +336,21 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS domain_occurrences (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                occ_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                action_hint TEXT NOT NULL,
+                expires_at_ts INTEGER NOT NULL,
+                resolved INTEGER NOT NULL DEFAULT 0,
+                created_at_ts INTEGER NOT NULL
+            )
+            """
+        )
 
         conn.execute(
             """
@@ -423,6 +445,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_unit_name_parts_role ON unit_name_parts(role, part_type)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_panel_events_user ON panel_events(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_panel_events_name ON panel_events(event_name)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_occurrences_user_active ON domain_occurrences(user_id, resolved, expires_at_ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_command_errors_ts ON command_errors(created_at_ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_discoveries_user ON discoveries_log(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_transactions_ts ON transactions(created_at_ts)")
@@ -697,6 +720,152 @@ def get_global_modifiers() -> dict[str, float]:
         "operation_risk_pct": float(row["operation_risk_pct"] or 0.0),
         "prestige_pct": float(row["prestige_pct"] or 0.0),
     }
+
+
+def _next_upgrade_target(d: sqlite3.Row) -> tuple[str, int, int]:
+    options: list[tuple[str, int, int]] = []
+    for key, label in (("barn_level", "celeiros"), ("barracks_level", "casernas"), ("forge_level", "forja")):
+        lvl = int(d[key] or 1)
+        if lvl >= MAX_BUILDING_TIER:
+            continue
+        options.append((label, lvl, building_upgrade_cost(lvl, label)))
+    if not options:
+        return "celeiros", MAX_BUILDING_TIER, 0
+    return min(options, key=lambda x: x[2])
+
+
+def _get_progress_pressure(d: sqlite3.Row) -> list[str]:
+    now = now_ts()
+    snap = economy_snapshot(
+        barn_level=d["barn_level"],
+        barracks_level=d["barracks_level"],
+        forge_level=d["forge_level"],
+        troops=d["troops"],
+    )
+    pressure: list[str] = []
+
+    elapsed_collect = effective_collect_seconds(now - int(d["last_collect_ts"] or now))
+    pending_collect = int(snap.production_per_hour * (elapsed_collect / 3600)) - int(snap.total_maintenance_per_hour * (elapsed_collect / 3600))
+    if elapsed_collect >= 600:
+        pressure.append(f"💰 Coleta pronta (+{format_money(max(0, pending_collect))})")
+
+    train_wait = max(0, TRAIN_COOLDOWN_SECONDS - (now - int(d["last_train_ts"] or now)))
+    if train_wait <= 0:
+        pressure.append("🛡️ Treino concluído (casernas prontas)")
+    elif train_wait <= 600:
+        pressure.append("⏳ Treino quase pronto")
+
+    near_unlock = conn_row = None
+    with get_conn() as conn:
+        rows = conn.execute("SELECT key, title, min_barracks_level FROM operations ORDER BY min_barracks_level ASC").fetchall()
+        for r in rows:
+            req = int(r["min_barracks_level"] or 1)
+            if int(d["barracks_level"]) + 1 >= req and int(d["barracks_level"]) < req:
+                near_unlock = f"⚠️ Quase desbloqueio: {r['title']} (falta Casernas T{req})"
+                break
+    if near_unlock:
+        pressure.append(near_unlock)
+
+    if not pressure:
+        pressure.append("✅ Nenhuma pressão crítica agora")
+    return pressure[:4]
+
+
+def _spawn_occurrence_if_needed(user_id: str, d: sqlite3.Row) -> None:
+    now = now_ts()
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE domain_occurrences SET resolved = 1 WHERE user_id = ? AND resolved = 0 AND expires_at_ts <= ?",
+            (user_id, now),
+        )
+        active = conn.execute(
+            "SELECT id FROM domain_occurrences WHERE user_id = ? AND resolved = 0 AND expires_at_ts > ? ORDER BY created_at_ts DESC",
+            (user_id, now),
+        ).fetchall()
+        if len(active) >= OCCURRENCE_MAX_ACTIVE:
+            conn.commit()
+            return
+
+        # Anti-spam: no máximo 1 criação por ~10 minutos.
+        recent = conn.execute(
+            "SELECT created_at_ts FROM domain_occurrences WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if recent and now - int(recent["created_at_ts"] or 0) < 600:
+            conn.commit()
+            return
+
+        roll = random.random()
+        if roll < 0.62:
+            occ_type = "rumor"
+            title = "Rumor de Campo"
+            description = "Batedores reportam rota mais segura para uma operação do seu nível atual."
+            action_hint = "Abra Operações e execute a rota recomendada."
+        elif roll < 0.94:
+            occ_type = "oportunidade"
+            title = "Janela de Oportunidade"
+            description = "Mercadores aceitam contratos rápidos: converter recursos agora rende vantagem prática."
+            action_hint = "Resgate ouro e converta em treino/upgrade imediatamente."
+        else:
+            occ_type = "pressagio"
+            title = "Presságio do Véu"
+            description = "As runas vibram com instabilidade. Um achado raro pode emergir se o risco for aceito."
+            action_hint = "Forje ou execute operação de alto risco nas próximas janelas."
+
+        expires_at = now + OCCURRENCE_TTL_SECONDS[occ_type]
+        conn.execute(
+            """
+            INSERT INTO domain_occurrences (user_id, occ_type, title, description, action_hint, expires_at_ts, resolved, created_at_ts)
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+            """,
+            (user_id, occ_type, title, description, action_hint, expires_at, now),
+        )
+        conn.commit()
+
+
+def get_active_occurrences(user_id: str) -> list[sqlite3.Row]:
+    d = get_or_create_domain(user_id)
+    _spawn_occurrence_if_needed(user_id, d)
+    now = now_ts()
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT * FROM domain_occurrences
+            WHERE user_id = ? AND resolved = 0 AND expires_at_ts > ?
+            ORDER BY CASE occ_type WHEN 'pressagio' THEN 1 WHEN 'oportunidade' THEN 2 ELSE 3 END, created_at_ts DESC
+            LIMIT ?
+            """,
+            (user_id, now, OCCURRENCE_MAX_ACTIVE),
+        ).fetchall()
+
+
+def get_next_step_recommendation(user_id: str, d: sqlite3.Row) -> str:
+    occurrences = get_active_occurrences(user_id)
+    if occurrences:
+        top = occurrences[0]
+        return f"Resolver ocorrência ativa: {top['title']} → {top['action_hint']}"
+
+    if int(d["gold"] or 0) < 50_000:
+        return "Focar economia: resgatar ouro e subir Celeiros para aumentar caixa por hora."
+
+    if int(d["troops"] or 0) < 250:
+        return "Focar militar: treinar tropas para abrir operações com melhor retorno."
+
+    with get_conn() as conn:
+        ops = conn.execute("SELECT key FROM operations ORDER BY id").fetchall()
+    for op in ops:
+        status = get_operation_status(user_id, str(op["key"]))
+        if status.startswith("✅"):
+            return f"Operação disponível agora: execute `{op['key']}` para converter poder em progresso e arquivo."
+
+    target, lvl, cost = _next_upgrade_target(d)
+    if cost > 0:
+        faltante = max(0, cost - int(d["gold"] or 0))
+        if faltante > 0:
+            return f"Quase-conquista: faltam {format_money(faltante)} para {target} T{lvl+1}."
+        return f"Melhor ação agora: subir {target} para T{lvl+1}."
+
+    return "Refine valor no Arquivo: forje e consolide coleção para status de legado."
 
 
 def resolve_discovery(user_id: str, source: str, forge_level: int) -> str:
@@ -1116,13 +1285,16 @@ def build_dominio_embed(user_id: str) -> discord.Embed:
     pending_gross = int(snap.production_per_hour * (elapsed / 3600))
     pending_maint = int(snap.total_maintenance_per_hour * (elapsed / 3600))
     pending_net = pending_gross - pending_maint
+    pressure = _get_progress_pressure(d)
+    occurrences = get_active_occurrences(user_id)
+    next_step = get_next_step_recommendation(user_id, d)
 
     g_name, g_rank = get_general_info(user_id, d["general_id"])
     s_name, s_rank = get_strategist_info(user_id, d["strategist_id"])
 
-    embed = discord.Embed(title="🏰 Domínio Imperial", color=discord.Color.dark_gold())
+    embed = discord.Embed(title="🏰 NEXAR | Quadro de Comando Vivo", color=discord.Color.dark_gold())
     embed.add_field(
-        name="Recursos",
+        name="A) Estado — Economia",
         value=(
             f"🪙 Ouro: **{d['gold']:,}**\n"
             f"💰 Ouro resgatável: **{pending_net:+,}**\n"
@@ -1132,25 +1304,33 @@ def build_dominio_embed(user_id: str) -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name="Estruturas",
-        value=(
-            f"🌾 Celeiros T{d['barn_level']}\n"
-            f"🛡️ Casernas T{d['barracks_level']}\n"
-            f"🔨 Forja T{d['forge_level']}"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Militar",
+        name="A) Estado — Militar/Infra",
         value=(
             f"👥 Tropas: **{d['troops']:,}**\n"
             f"⚔️ Poder: **{d['power']:,}**\n"
+            f"🌾/🛡️/🔨 Tiers: **{d['barn_level']} / {d['barracks_level']} / {d['forge_level']}**\n"
             f"🧭 Doutrina: **{d['doctrine']}**\n"
             f"🎖️ General: **{g_name}** (Rank {g_rank})\n"
             f"📐 Estrategista: **{s_name}** (Rank {s_rank})"
         ).replace(",", "."),
         inline=False,
     )
+
+    embed.add_field(name="B) Pressão — Atenção imediata", value="\n".join(f"• {p}" for p in pressure), inline=False)
+
+    if occurrences:
+        occ_lines = []
+        now = now_ts()
+        for occ in occurrences:
+            ttl = max(0, int(occ["expires_at_ts"]) - now)
+            mins = max(1, ttl // 60)
+            icon = "🕯️" if occ["occ_type"] == "pressagio" else ("✨" if occ["occ_type"] == "oportunidade" else "🗞️")
+            occ_lines.append(f"{icon} **{occ['title']}** ({occ['occ_type']}) • expira em ~{mins}m\n↳ {occ['action_hint']}")
+        embed.add_field(name="C) Oportunidade — O que apareceu", value="\n\n".join(occ_lines), inline=False)
+    else:
+        embed.add_field(name="C) Oportunidade — O que apareceu", value="Nenhuma ocorrência ativa no momento.", inline=False)
+
+    embed.add_field(name="D) Direção — Próximo passo recomendado", value=f"➡️ {next_step}", inline=False)
     embed.set_footer(text="Botões: Resgatar • Treinar • Construções • Militar • Operações • Rank")
     return embed
 
@@ -1225,9 +1405,10 @@ def build_militar_embed(user_id: str, notice: str | None = None) -> discord.Embe
     embed.add_field(
         name="Fluxo",
         value=(
-            "✅ Composição militar pronta\n"
-            "Δ Evoluir General + Estrategista amplia bônus de poder\n"
-            "Próximo: evolua ambos e avance para Operações"
+            "✅ Tropa = massa bruta\n"
+            "🎖️ General = força de impacto\n"
+            "📐 Estrategista = eficiência e redução de risco\n"
+            "Próximo: ajustar composição e converter isso em Operações"
         ),
         inline=False,
     )
@@ -1242,7 +1423,14 @@ def build_operacoes_embed(user_id: str, notice: str | None = None) -> discord.Em
     lines: list[str] = []
     for op in ops:
         status = get_operation_status(user_id, op["key"])
-        lines.append(f"• `{op['key']}` — {status}")
+        lines.append(
+            (
+                f"• `{op['key']}` — {status}\n"
+                f"  ↳ Ganho: {format_money(int(op['base_gold_reward']))} ouro | "
+                f"Risco base: {float(op['base_risk_percent'] or 0)*100:.0f}% | "
+                f"Tentação: {'alta' if int(op['prestige_reward'] or 0) >= 15 else 'média'}"
+            )
+        )
 
     embed = discord.Embed(title="⚔️ Painel de Operações", color=discord.Color.dark_red())
     embed.description = "\n".join(lines) if lines else "Nenhuma operação cadastrada."
@@ -1251,9 +1439,9 @@ def build_operacoes_embed(user_id: str, notice: str | None = None) -> discord.Em
     embed.add_field(
         name="Fluxo",
         value=(
-            "✅ Operações verificadas por requisito\n"
-            "Δ Operações reais gravam histórico e impacto em operation_runs\n"
-            "Próximo: escolha uma operação no seletor"
+            "✅ Operações são porta de tentação: risco x recompensa x descoberta\n"
+            "Δ Cada execução consome atenção e gera legado real\n"
+            "Próximo: escolha a operação com melhor relação risco/retorno para seu estado"
         ),
         inline=False,
     )
@@ -1379,28 +1567,65 @@ async def forjar(ctx: commands.Context) -> None:
 async def cronicas(ctx: commands.Context) -> None:
     user_id = str(ctx.author.id)
     with get_conn() as conn:
-        rows = conn.execute(
+        summary = conn.execute(
             """
-            SELECT rarity, fragment_text, impact_text, created_at_ts
-            FROM discoveries_log
-            WHERE user_id = ?
-            ORDER BY id DESC
-            LIMIT 8
+            SELECT
+                COALESCE(SUM(CASE WHEN i.name LIKE 'Pergaminho%' THEN iv.quantity ELSE 0 END), 0) AS pergaminhos,
+                COALESCE(SUM(CASE WHEN i.name LIKE 'Fragmento%' THEN iv.quantity ELSE 0 END), 0) AS fragmentos,
+                COALESCE(SUM(CASE WHEN i.rarity IN ('R','SS') THEN iv.quantity ELSE 0 END), 0) AS reliquias,
+                COALESCE(SUM(CASE WHEN i.rarity IN ('SSS','SSS+','99999') THEN iv.quantity ELSE 0 END), 0) AS entidades,
+                COALESCE(COUNT(DISTINCT iv.item_id), 0) AS unicos
+            FROM inventories iv
+            JOIN items i ON i.id = iv.item_id
+            WHERE iv.user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+
+        top_items = conn.execute(
+            """
+            SELECT i.name, i.rarity, iv.quantity,
+                   (SELECT dl.source FROM discoveries_log dl WHERE dl.user_id = iv.user_id AND dl.item_id = iv.item_id ORDER BY dl.id DESC LIMIT 1) AS source,
+                   (SELECT dl.created_at_ts FROM discoveries_log dl WHERE dl.user_id = iv.user_id AND dl.item_id = iv.item_id ORDER BY dl.id DESC LIMIT 1) AS last_seen
+            FROM inventories iv
+            JOIN items i ON i.id = iv.item_id
+            WHERE iv.user_id = ?
+            ORDER BY i.rarity DESC, iv.quantity DESC, i.name ASC
+            LIMIT 10
             """,
             (user_id,),
         ).fetchall()
 
-    if not rows:
+    if not top_items:
         await ctx.send("Nenhum registro encontrado nas Crônicas. A lore ainda não te encontrou.")
         return
 
+    embed = discord.Embed(title="📖 NEXAR | Arquivo de Crônicas", color=discord.Color.dark_purple())
+    embed.add_field(
+        name="Resumo da coleção",
+        value=(
+            f"Fragmentos: **{int(summary['fragmentos'] or 0)}**\n"
+            f"Pergaminhos: **{int(summary['pergaminhos'] or 0)}**\n"
+            f"Relíquias: **{int(summary['reliquias'] or 0)}**\n"
+            f"Entidades: **{int(summary['entidades'] or 0)}**\n"
+            f"Registros únicos: **{int(summary['unicos'] or 0)}**"
+        ),
+        inline=False,
+    )
+
     lines = []
-    for r in rows:
+    for row in top_items[:8]:
+        source = str(row["source"] or "origem desconhecida")
+        last_seen = int(row["last_seen"] or 0)
+        ts = f"<t:{last_seen}:R>" if last_seen else "sem data"
         lines.append(
-            f"• [{r['rarity']}] {r['fragment_text']}\n"
-            f"  ↳ Impacto: {r['impact_text']}"
+            f"• [{row['rarity']}] **{row['name']}** x{int(row['quantity'])}\n"
+            f"  ↳ Origem: `{source}` • Última aquisição: {ts}"
         )
-    await ctx.send("📖 Crônicas de Descobertas\n" + "\n".join(lines))
+
+    embed.add_field(name="Detalhe (raridade + quantidade)", value="\n".join(lines), inline=False)
+    embed.set_footer(text="Duplicatas empilham por item • Forja e Operações alimentam o Arquivo")
+    await ctx.send(embed=embed)
 
 
 
@@ -1937,6 +2162,8 @@ GUIDE_PAGES: list[tuple[str, str]] = [
         "• **Riqueza**: ouro para upgrades e manutenção.\n"
         "• **Poder**: tropas + doutrina + General e Estrategista nativos do domínio.\n"
         "• **Prestígio**: pontuação sazonal por operações.\n\n"
+        "**Motor vivo:** Rumor, Oportunidade e Presságio surgem no `!dominio` e indicam ações concretas.\n"
+        "Cada ocorrência expira e altera seu foco de decisão.\n\n"
         "**Próximo passo claro:** ajuste doutrina no painel Militar e simule Operações.",
     ),
     (
