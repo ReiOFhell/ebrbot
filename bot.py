@@ -1643,6 +1643,31 @@ async def cofre_error(ctx: commands.Context, error: commands.CommandError) -> No
 
 def delete_domain_data(user_id: str) -> None:
     with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        # Limpa participação em rifas e recalcula agregados das rifas ativas.
+        conn.execute("DELETE FROM raffle_entries WHERE user_id = ?", (user_id,))
+        active_raffles = conn.execute("SELECT id FROM raffles WHERE status = 'active'").fetchall()
+        for row in active_raffles:
+            rid = int(row["id"])
+            totals = conn.execute(
+                "SELECT COALESCE(SUM(tickets),0) AS total_tickets, COUNT(*) AS participants FROM raffle_entries WHERE raffle_id = ?",
+                (rid,),
+            ).fetchone()
+            total_tickets = int(totals["total_tickets"] or 0)
+            participants = int(totals["participants"] or 0)
+            conn.execute(
+                "UPDATE raffles SET total_tickets = ?, participants_total = ?, total_pot = ? WHERE id = ?",
+                (total_tickets, participants, total_tickets * 50_000, rid),
+            )
+
+        # Blackjack: sessão ativa, histórico e estatísticas.
+        conn.execute("UPDATE blackjack_sessions SET status = 'cancelled', updated_at_ts = ? WHERE user_id = ? AND status = 'active'", (now_ts(), user_id))
+        conn.execute("DELETE FROM blackjack_history WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM blackjack_stats WHERE user_id = ?", (user_id,))
+
+        # Ledger financeiro relacionado ao usuário.
+        conn.execute("DELETE FROM transactions WHERE from_user_id = ? OR to_user_id = ?", (user_id, user_id))
+
         conn.execute("DELETE FROM season_scores WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM operation_runs WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM inventories WHERE user_id = ?", (user_id,))
@@ -1686,6 +1711,32 @@ async def excluirdominio_error(ctx: commands.Context, error: commands.CommandErr
     await ctx.send("Erro interno ao excluir domínio.")
 
 
+@bot.command(name="resetall", hidden=True)
+@commands.has_permissions(administrator=True)
+async def resetall(ctx: commands.Context, membro: discord.Member | None = None) -> None:
+    if membro is None:
+        await ctx.send("Uso: `!resetall @membro`")
+        return
+
+    alvo_id = str(membro.id)
+    delete_domain_data(alvo_id)
+    await ctx.send(
+        (
+            f"<@{ctx.author.id}> ✅ Reset total aplicado em <@{membro.id}>.\n"
+            "Domínio, ouro, militar, operações, rifas, blackjack, arquivo e rastros financeiros foram limpos."
+        )
+    )
+
+
+@resetall.error
+async def resetall_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Apenas administradores podem usar `!resetall`.")
+        return
+    logger.exception("Erro em !resetall", exc_info=error)
+    await ctx.send("Erro interno ao resetar usuário.")
+
+
 def build_admin_embed() -> discord.Embed:
     embed = discord.Embed(
         title=f"🛠️ Painel de Administração — {APP_NAME}",
@@ -1697,7 +1748,9 @@ def build_admin_embed() -> discord.Embed:
         name="Economia / Conta",
         value=(
             "`!addouro @membro <quantidade>`\n"
-            "Adiciona ouro diretamente ao feudo de qualquer jogador."
+            "Adiciona ouro diretamente ao feudo de qualquer jogador.\n\n"
+            "`!resetall @membro`\n"
+            "Reset total do usuário (volta ao estado de novo no bot)."
         ),
         inline=False,
     )
@@ -1796,7 +1849,7 @@ GUIDE_PAGES: list[tuple[str, str]] = [
         "`!bj <aposta>` → abrir Mesa Imperial (Blackjack)\n"
         "`!bjstats` / `!bjrank` → estatísticas e ranking do blackjack\n\n"
         f"**{APP_NAME}:** {APP_SLOGAN}\n"
-        "**Admin (oculto):** `!admin`, `!addouro`, `!excluirdominio`, `!diagnostico`, `!painel_kpis`, `!economia_teste`, `!decreto_soberano`\n"
+        "**Admin (oculto):** `!admin`, `!addouro`, `!resetall`, `!excluirdominio`, `!diagnostico`, `!painel_kpis`, `!economia_teste`, `!decreto_soberano`\n"
         "**Dica:** se uma view expirar, use `🔄 Reabrir Painel`.",
     ),
 ]
