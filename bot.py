@@ -67,6 +67,8 @@ HOUSE_INITIAL_GOLD = 1_000_000_000
 PAY_MIN = 1
 PAY_MAX = 50_000_000
 PAY_FEE_PCT = 0.02
+RESET_GLOBAL_CONFIRM_WINDOW = 30
+RESET_GLOBAL_PENDING: dict[str, int] = {}
 
 
 def now_ts() -> int:
@@ -1683,6 +1685,58 @@ def delete_domain_data(user_id: str) -> None:
         conn.commit()
 
 
+def reset_all_game_data() -> None:
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+
+        # Limpa absolutamente todo progresso de jogo e histórico dos usuários.
+        tables_to_wipe = [
+            "raffle_entries",
+            "raffles",
+            "raffle_runtime",
+            "raffle_state",
+            "blackjack_sessions",
+            "blackjack_stats",
+            "blackjack_history",
+            "transactions",
+            "season_scores",
+            "operation_runs",
+            "inventories",
+            "discoveries_log",
+            "panel_events",
+            "command_errors",
+            "strategists",
+            "generals",
+            "army",
+            "resources",
+            "domain_buildings",
+            "domains",
+        ]
+
+        existing = {
+            str(r[0])
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+
+        for table in tables_to_wipe:
+            if table in existing:
+                conn.execute(f"DELETE FROM {table}")
+
+        # Reinicia sequências autoincrement quando disponível.
+        if "sqlite_sequence" in existing:
+            for table in tables_to_wipe:
+                conn.execute("DELETE FROM sqlite_sequence WHERE name = ?", (table,))
+
+        # Cofre da Casa também volta ao estado inicial.
+        conn.execute("DELETE FROM house_bank")
+        conn.execute(
+            "INSERT INTO house_bank (house_id, gold, updated_at_ts) VALUES (?, ?, ?)",
+            (HOUSE_ID, HOUSE_INITIAL_GOLD, now_ts()),
+        )
+
+        conn.commit()
+
+
 @bot.command(name="excluirdominio", hidden=True)
 @commands.has_permissions(administrator=True)
 async def excluirdominio(ctx: commands.Context, membro: discord.Member | None = None) -> None:
@@ -1737,6 +1791,49 @@ async def resetall_error(ctx: commands.Context, error: commands.CommandError) ->
     await ctx.send("Erro interno ao resetar usuário.")
 
 
+@bot.command(name="resetglobal", hidden=True)
+@commands.has_permissions(administrator=True)
+async def resetglobal(ctx: commands.Context, confirmacao: str | None = None) -> None:
+    admin_id = str(ctx.author.id)
+    now = now_ts()
+
+    if (confirmacao or "").strip().lower() != "confirmar":
+        RESET_GLOBAL_PENDING[admin_id] = now + RESET_GLOBAL_CONFIRM_WINDOW
+        await ctx.send(
+            (
+                f"⚠️ <@{ctx.author.id}> Isso vai resetar **TUDO** (domínios, ouro, rifas, blackjack, operações, crônicas, rankings e logs).\n"
+                f"Se realmente deseja continuar, execute em até {RESET_GLOBAL_CONFIRM_WINDOW}s:\n"
+                "`!resetglobal confirmar`"
+            )
+        )
+        return
+
+    expires_at = RESET_GLOBAL_PENDING.get(admin_id, 0)
+    if expires_at < now:
+        await ctx.send(
+            f"❌ <@{ctx.author.id}> Confirmação expirada. Rode `!resetglobal` novamente e confirme em até {RESET_GLOBAL_CONFIRM_WINDOW}s."
+        )
+        return
+
+    RESET_GLOBAL_PENDING.pop(admin_id, None)
+    reset_all_game_data()
+    if raffles_service is not None:
+        raffles_service.init_db()
+
+    await ctx.send(
+        f"<@{ctx.author.id}> ✅ Reset global concluído. O NEXAR foi reiniciado do zero (Casa, domínios, rifas, blackjack e histórico)."
+    )
+
+
+@resetglobal.error
+async def resetglobal_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Apenas administradores podem usar `!resetglobal`.")
+        return
+    logger.exception("Erro em !resetglobal", exc_info=error)
+    await ctx.send("Erro interno ao executar reset global.")
+
+
 def build_admin_embed() -> discord.Embed:
     embed = discord.Embed(
         title=f"🛠️ Painel de Administração — {APP_NAME}",
@@ -1750,7 +1847,9 @@ def build_admin_embed() -> discord.Embed:
             "`!addouro @membro <quantidade>`\n"
             "Adiciona ouro diretamente ao feudo de qualquer jogador.\n\n"
             "`!resetall @membro`\n"
-            "Reset total do usuário (volta ao estado de novo no bot)."
+            "Reset total do usuário (volta ao estado de novo no bot).\n\n"
+            "`!resetglobal` + `!resetglobal confirmar`\n"
+            "Reset absoluto do NEXAR inteiro com confirmação obrigatória."
         ),
         inline=False,
     )
@@ -1849,7 +1948,7 @@ GUIDE_PAGES: list[tuple[str, str]] = [
         "`!bj <aposta>` → abrir Mesa Imperial (Blackjack)\n"
         "`!bjstats` / `!bjrank` → estatísticas e ranking do blackjack\n\n"
         f"**{APP_NAME}:** {APP_SLOGAN}\n"
-        "**Admin (oculto):** `!admin`, `!addouro`, `!resetall`, `!excluirdominio`, `!diagnostico`, `!painel_kpis`, `!economia_teste`, `!decreto_soberano`\n"
+        "**Admin (oculto):** `!admin`, `!addouro`, `!resetall`, `!resetglobal`, `!excluirdominio`, `!diagnostico`, `!painel_kpis`, `!economia_teste`, `!decreto_soberano`\n"
         "**Dica:** se uma view expirar, use `🔄 Reabrir Painel`.",
     ),
 ]
